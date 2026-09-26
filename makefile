@@ -1,6 +1,8 @@
 # makefile --- build, test and install ff
-# rev 6ab77d4a 20260926 from cksh makefile rev 6ab75454
 # (c) 2026 George Georgalis <george@iuxta.com> Unlimited use with attribution.
+#
+# org 6ab7fec8 20260926 102008 PDT Sat 10:20 AM 26 Sep 2026
+#     C build, test and install for ff, from the cksh makefile
 #
 # Portable across GNU make, bmake (NetBSD, pkgsrc) and Apple make: no ifeq,
 # no $(shell), no ?=; platform branching happens inside recipe shells.
@@ -10,7 +12,7 @@
 #
 #   make                       build ./ff and ./ff.1
 #   make test                  regression suite (test.sh)
-#   make install [PREFIX=dir]  PREFIX defaults to $LOCALBASE (pkgsrc), else /usr/local
+#   make install [PREFIX=dir]  PREFIX defaults to /usr/local for root, else $HOME
 #   make CC=$LOCALBASE/bin/gcc toolchain override, e.g. pkgsrc gcc
 
 FFFLAGS = -std=c99 -Wall -Wextra -Wpedantic -O2
@@ -38,7 +40,7 @@ test: ff
 	sh ./test.sh
 
 install: all
-	@p='$(PREFIX)'; [ -n "$$p" ] || p='$(LOCALBASE)'; [ -n "$$p" ] || p=/usr/local; \
+	@p='$(PREFIX)'; [ -n "$$p" ] || { [ "`id -u`" = 0 ] && p=/usr/local || p="$$HOME" ; }; \
 	case "$$p$(DESTDIR)" in *[!A-Za-z0-9._/+-]*) echo "install: unsafe path '$$p'" >&2; exit 1 ;; esac; \
 	m=man; [ -d "$$p/share/man" ] && m=share/man; \
 	d='$(DESTDIR)'; set -x; \

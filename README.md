@@ -20,9 +20,10 @@ scheme:
 - `ff.fn.bash` --- bash function that translates the ff grammar into an
   argument array for the host's native find (BSD or GNU dialect, probed per
   call) and never uses `eval`. Where the native find cannot express a
-  request it exits 2 and names the binary. Load it with `. ff.fn.bash`.
+  request it exits 2 and names the binary. Load it with `. ff.fn.bash`; its
+  body runs in a subshell, so only `ff` enters the caller's namespace.
 
-The same model as [cksh](https://github.com/claude-6ab7/cksh): `-h` and
+The same model as cksh: `-h` and
 `--help` are compiled in, the man page is generated from `--help`, and the
 test suite checks the two implementations against each other.
 
@@ -31,7 +32,7 @@ test suite checks the two implementations against each other.
 ```
 make            # ./ff and ./ff.1 (man page generated from --help)
 make test       # regression suite, test.sh
-make install    # PREFIX defaults to $LOCALBASE (pkgsrc), else /usr/local
+make install    # PREFIX defaults to /usr/local for root, else $HOME
 make CC=$LOCALBASE/bin/gcc
 ```
 
@@ -106,9 +107,22 @@ control characters, DEL and invalid UTF-8 print as `\ooo`, so a crafted file
 name cannot drive the terminal. Diagnostics on a terminal follow the same
 rule.
 
-## Exit status
+## Diagnostics and exit status
 
-A bitmask. Statuses 1 and 2 are fatal. The others accumulate while the walk
+Messages go to stderr in the format of the shell `chkerr` and `chkwrn`
+functions, one line each, ending in a hex tag that names the message:
+
+```
+>>> ff : cannot stat 't/nope': No such file or directory (6ab7ff32)
+>>> ff : -t: types are f d l p s b c 'q' (6ab7ff0a)
+^^^ ff : filesystem loop, skipped 't/d/up' (6ab7ff3a)
+```
+
+Usage errors are identical, message and tag, from the binary and the bash
+function. Only the binary adds the system's reason, as after the colon
+above.
+
+The exit status is a bitmask. Statuses 1 and 2 are fatal. The others accumulate while the walk
 continues.
 
 | bit | meaning |
@@ -182,12 +196,23 @@ A path operand beginning with `-` also exits 2.
 
 ## Verified
 
-- `make test` passes, 188 cases, under GNU make on Linux (glibc 2.39): gcc
+- `make test` passes, 219 cases, under GNU make on Linux (glibc 2.39): gcc
   and clang, a gcc build with ASan and UBSan, and as root and non-root.
-  Root skips the unreadable-directory case.
+  Root skips the unreadable-directory case. gcc and clang compile ff.c
+  clean under `-Werror`, including a syntax check of the Darwin branch.
 - The walk matches GNU find 4.9 on each primary it shares.
 - Not yet run under bmake, on NetBSD, or on Darwin. The makefile avoids
   every construct bmake rejects, but it is unverified there, as are the
   BSD branches of `ff.fn.bash`.
 
 See `PLAN.md` for the design record and the decisions log.
+
+## History
+
+```
+org 6ab7fec8 20260926 102008 PDT Sat 10:20 AM 26 Sep 2026
+    owned openat walker with dev/ino verification; one-letter grammar;
+    -x execdir, -j exec, -delete through the verified parent; getent ids
+    on Linux; tty escaping; status bitmask; chkerr/chkwrn diagnostics;
+    bash translator ff.fn.bash for the native find
+```

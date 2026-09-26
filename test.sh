@@ -1,7 +1,9 @@
 #!/bin/sh
 # test.sh --- regression suite for ff (C binary) and ff.fn.bash (translator)
-# rev 6ab77d4a 20260926 one case per promised behavior; run via make test
 # (c) 2026 George Georgalis <george@iuxta.com> Unlimited use with attribution.
+#
+# org 6ab7fec8 20260926 102008 PDT Sat 10:20 AM 26 Sep 2026
+#     one case per promised behavior, run via make test
 #
 # POSIX sh. Native find is the reference where ff keeps find semantics;
 # bash parity cases skip when bash is absent; tty cases need script(1).
@@ -177,7 +179,13 @@ eq "default path ." "`cd t && find . | LC_ALL=C sort`" "`cd t && "$B" | LC_ALL=C
 # --- help: -h short, --help manual, man page source ---
 eq "-h rc" 0 "`$B -h >/dev/null; echo $?`"
 eq "--help rc" 0 "`$B --help >/dev/null; echo $?`"
-eq "--help sections" 12 "`$B --help | grep -c '^[A-Z][A-Z ]*$'`"
+eq "--help sections" 14 "`$B --help | grep -c '^[A-Z][A-Z ]*$'`"
+
+# --- diagnostics: chkerr (>>>) and chkwrn (^^^) format, hex tag naming the message ---
+eq "err format" ">>> ff : cannot stat 't/nope': No such file or directory (6ab7ff32)" "`"$B" t/nope 2>&1 >/dev/null`"
+eq "usage format" ">>> ff : -t: types are f d l p s b c 'q' (6ab7ff0a)" "`"$B" t -t q 2>&1 >/dev/null`"
+eq "wrn format" 1 "`"$B" -L t -n nothing 2>&1 >/dev/null | grep -Fcx "^^^ ff : filesystem loop, skipped 't/d/up' (6ab7ff3a)"`"
+eq "one line per usage error" 1 "`"$B" -y 2>&1 >/dev/null | wc -l | tr -d ' '`"
 
 # --- bash translator parity: identical stdout and status on a pipe ---
 if [ -n "$have_bash" ]; then
@@ -193,6 +201,15 @@ if [ -n "$have_bash" ]; then
   # the native find reports failure as one bit: status parity only for success and usage
   eq "bash -L loop stdout" "`c -L t -t d | sed '$d'`" "`b -L t -t d | sed '$d'`"
   eq "bash -L loop status nonzero" 1 "`b -L t -t d | tail -1 | grep -vc '^rc=0$'`"
+  # usage diagnostics are identical, message and tag
+  for o in "-q t" "t -n" "t -t q" "t (" "t ( )" "t )" "t -o -f" "t !" "t -d x" "t -s 1q" "t -m 1y" \
+      "t -k 999" "t -l x" "t -i x" "t -w t/nope" "t -u nosuchuser_ff" "t -g nosuchgroup_ff" "t -y" "t -n a b" \
+      "t -x echo {}" "t -x {} ;" "t -x ;" "t -x echo a{} ;" "t -j echo {} {} +" "t -x ./x ;" "-L t -delete"
+  do
+    set -f; eq "bash diagnostics [$o]" "`"$B" $o 2>&1 >/dev/null`" "`bash -c '. "$0"; ff "$@"' "$F" $o 2>&1 >/dev/null`"; set +f
+  done
+  # namespace: only ff is defined in the caller's shell
+  eq "bash namespace" "declare -f ff" "`bash -c '. "$0"; declare -F' "$F"`"
   eq "bash PATH guard" "rc=2" "`PATH=.:$PATH b t -x ls \;`"
   eq "bash + sets" "`"$B" t -t f -x echo {} + | tr ' ' '\n' | LC_ALL=C sort`" \
     "`bash -c '. "$0"; ff t -t f -x echo {} +' "$F" | tr ' ' '\n' | LC_ALL=C sort`"

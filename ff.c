@@ -1,7 +1,11 @@
 /*
  * ff.c --- functional find: NetBSD find(1) semantics, one letter per switch
- * rev 6ab77d4a 20260926 initial; companion ff.fn.bash, model cksh
  * (c) 2026 George Georgalis <george@iuxta.com> Unlimited use with attribution.
+ *
+ * org 6ab7fec8 20260926 102008 PDT Sat 10:20 AM 26 Sep 2026
+ *     owned openat walker, one-letter grammar, -x/-j/-delete, getent ids,
+ *     tty escaping, status bitmask, chkerr/chkwrn diagnostics; companion
+ *     ff.fn.bash translates to the native find; model cksh
  *
  * Dependency posture: none beyond libc. On Linux, -u and -g names resolve
  * through getent(1) at a fixed path, never getpwnam(3): a static glibc
@@ -79,7 +83,7 @@ static long mindepth = 0, maxdepth = LONG_MAX;
 
 static time_t now;
 static int esc_out, esc_err;	/* escape names: stdout/stderr is a tty */
-static int quitting, need_stat, warned_btime;
+static int quitting, need_stat;
 
 /* ---------------------------------------------------------------- output */
 
@@ -131,34 +135,41 @@ putname(FILE *f, const char *s, int esc)
 		}
 }
 
-/* diagnostics: one path to stderr, prefixed with program name */
+/*
+ * Diagnostics, formatted as the shell chkerr (">>> ") and chkwrn ("^^^ ")
+ * functions: "ff : what 'name'[: why] (tag)". The hex tag names the message;
+ * usage messages and tags are identical in ff.fn.bash.
+ */
 static void
-warnf(const char *what, const char *name, int err)
+msg(const char *lvl, const char *what, const char *name, const char *why,
+    const char *tag)
 {
 	/* stderr failure has nowhere else to go */
-	(void)fprintf(stderr, "%s: %s", prog, what);
+	(void)fprintf(stderr, "%s%s : %s", lvl, prog, what);
 	if (name) {
 		(void)fputs(" '", stderr);
 		putname(stderr, name, esc_err);
 		(void)fputc('\'', stderr);
 	}
-	if (err)
-		(void)fprintf(stderr, ": %s", strerror(err));
-	(void)fputc('\n', stderr);
+	if (why)
+		(void)fprintf(stderr, ": %s", why);
+	(void)fprintf(stderr, " (%s)\n", tag);
 }
+#define ERR(w, n, y, t) msg(">>> ", (w), (n), (y), (t))
+#define WRN(w, n, y, t) msg("^^^ ", (w), (n), (y), (t))
 
 static void
-die(int st, const char *what, const char *name, int err)
+die(int st, const char *what, const char *name, const char *why, const char *tag)
 {
-	warnf(what, name, err);
+	ERR(what, name, why, tag);
 	exit(st);
 }
 
+/* usage error: status 1 before any walk */
 static void
-bad(const char *what, const char *arg)
+bad(const char *what, const char *arg, const char *tag)
 {
-	warnf(what, arg, 0);
-	(void)fprintf(stderr, "%s: -h for usage\n", prog);
+	ERR(what, arg, NULL, tag);
 	exit(ST_USAGE);
 }
 
@@ -166,7 +177,7 @@ static void *
 xrealloc(void *p, size_t n)
 {
 	if ((p = realloc(p, n ? n : 1)) == NULL)
-		die(ST_ENV, "out of memory", NULL, 0);
+		die(ST_ENV, "out of memory", NULL, NULL, "6ab7ff20");
 	return p;
 }
 
@@ -182,7 +193,7 @@ static void
 xflush(void)
 {
 	if (fflush(stdout) == EOF || ferror(stdout))
-		die(ST_ENV, "write error on stdout", NULL, errno);
+		die(ST_ENV, "write error on stdout", NULL, strerror(errno), "6ab7ff21");
 }
 
 /* ------------------------------------------------------------ expression */
@@ -257,22 +268,22 @@ num(const char *s, int *cmp, uintmax_t *v)
 /* unit suffix: at most one character from units, else error */
 static uintmax_t
 suffix(const char *p, const char *units, const uintmax_t *mult,
-    uintmax_t dflt, const char *what, const char *arg)
+    uintmax_t dflt, const char *what, const char *arg, const char *tag)
 {
 	const char *u = NULL;
 
 	if (*p == '\0')
 		return dflt;
 	if (p[1] != '\0' || (u = strchr(units, *p)) == NULL)
-		bad(what, arg);
+		bad(what, arg, tag);
 	return mult[u - units];
 }
 
 static uintmax_t
-mul(uintmax_t a, uintmax_t b, const char *what, const char *arg)
+mul(uintmax_t a, uintmax_t b, const char *what, const char *arg, const char *tag)
 {
 	if (b && a > UINTMAX_MAX / b)
-		bad(what, arg);
+		bad(what, arg, tag);
 	return a * b;
 }
 
@@ -288,7 +299,7 @@ parse_mode(const char *s, const char *arg)
 		for (p = s; *p >= '0' && *p <= '7' && p - s < 4; p++)
 			m = m << 3 | (unsigned long)(*p - '0');
 		if (*p != '\0')
-			bad("-k: bad mode", arg);
+			bad("-k: bad mode", arg, "6ab7ff11");
 		return (mode_t)m;
 	}
 	for (p = s;;) {
@@ -298,7 +309,7 @@ parse_mode(const char *s, const char *arg)
 		if (who == 0)
 			who = 07777;
 		if (*p != '+' && *p != '-' && *p != '=')
-			bad("-k: bad mode", arg);
+			bad("-k: bad mode", arg, "6ab7ff11");
 		op = *p++;
 		for (bits = 0; *p && strchr("rwxst", *p); p++)
 			bits |= *p == 'r' ? 0444 : *p == 'w' ? 0222 :
@@ -310,7 +321,7 @@ parse_mode(const char *s, const char *arg)
 		if (*p == '\0')
 			break;
 		if (*p++ != ',' || *p == '\0')
-			bad("-k: bad mode", arg);
+			bad("-k: bad mode", arg, "6ab7ff11");
 	}
 	return (mode_t)m;
 }
@@ -320,7 +331,7 @@ parse_mode(const char *s, const char *arg)
  * dynamically linked getent consults NSS as configured, which this binary
  * may not. Exit 2 from getent is "no such key". */
 static uintmax_t
-getent_id(const char *db, const char *s, const char *what)
+getent_id(const char *db, const char *s, const char *what, const char *tag)
 {
 	static const char *const bin[] = { "/usr/bin/getent", "/bin/getent" };
 	char buf[4096], *p, *av[5];
@@ -334,7 +345,7 @@ getent_id(const char *db, const char *s, const char *what)
 	for (i = 0; i < sizeof bin / sizeof *bin && access(bin[i], X_OK); i++)
 		;
 	if (i == sizeof bin / sizeof *bin)
-		die(ST_ENV, "no getent to resolve names, use a numeric id", s, 0);
+		die(ST_ENV, "no getent to resolve names, use a numeric id", s, NULL, "6ab7ff22");
 	av[0] = (char *)"getent";
 	av[1] = (char *)db;
 	av[2] = (char *)"--";
@@ -342,9 +353,9 @@ getent_id(const char *db, const char *s, const char *what)
 	av[4] = NULL;
 	xflush();
 	if (pipe(pfd) == -1)
-		die(ST_ENV, "pipe", NULL, errno);
+		die(ST_ENV, "pipe", NULL, strerror(errno), "6ab7ff23");
 	if ((pid = fork()) == -1)
-		die(ST_ENV, "fork", NULL, errno);
+		die(ST_ENV, "fork", NULL, strerror(errno), "6ab7ff24");
 	if (pid == 0) {
 		int nul = open("/dev/null", O_RDWR);
 
@@ -362,17 +373,17 @@ getent_id(const char *db, const char *s, const char *what)
 	(void)close(pfd[0]);
 	while (waitpid(pid, &st, 0) == -1)
 		if (errno != EINTR)
-			die(ST_ENV, "waitpid", NULL, errno);
+			die(ST_ENV, "waitpid", NULL, strerror(errno), "6ab7ff25");
 	buf[n] = '\0';
 	if (WIFEXITED(st) && WEXITSTATUS(st) == 2)
-		bad(what, s);
+		bad(what, s, tag);
 	if (!WIFEXITED(st) || WEXITSTATUS(st) != 0)
-		die(ST_ENV, "getent failed resolving", s, 0);
+		die(ST_ENV, "getent failed resolving", s, NULL, "6ab7ff26");
 	/* first line must name s exactly, then two fields to the id */
 	if (strncmp(buf, s, len) || buf[len] != ':' ||
 	    (p = strchr(buf + len + 1, ':')) == NULL ||
 	    (q = num(p + 1, &cmp, &v)) == NULL || cmp || *q != ':')
-		die(ST_ENV, "unexpected getent output for", s, 0);
+		die(ST_ENV, "unexpected getent output for", s, NULL, "6ab7ff27");
 	return v;
 }
 #endif
@@ -387,28 +398,31 @@ parse_id(const char *s, int user)
 	if ((p = num(s, &cmp, &v)) != NULL && *p == '\0' && cmp == 0)
 		;
 	else if (*s == '\0' || *s == '-' || strpbrk(s, ":\n"))
-		bad(user ? "-u: no such user" : "-g: no such group", s);
+		bad(user ? "-u: no such user" : "-g: no such group", s,
+		    user ? "6ab7ff12" : "6ab7ff13");
 	else {
 #if defined(__linux__)
 		v = getent_id(user ? "passwd" : "group", s,
-		    user ? "-u: no such user" : "-g: no such group");
+		    user ? "-u: no such user" : "-g: no such group",
+		    user ? "6ab7ff12" : "6ab7ff13");
 #else
 		struct passwd *pw;
 		struct group *gr;
 
 		if (user) {
 			if ((pw = getpwnam(s)) == NULL)
-				bad("-u: no such user", s);
+				bad("-u: no such user", s, "6ab7ff12");
 			v = pw->pw_uid;
 		} else {
 			if ((gr = getgrnam(s)) == NULL)
-				bad("-g: no such group", s);
+				bad("-g: no such group", s, "6ab7ff13");
 			v = gr->gr_gid;
 		}
 #endif
 	}
 	if (v > (user ? (uintmax_t)(uid_t)-1 : (uintmax_t)(gid_t)-1))
-		bad(user ? "-u: id out of range" : "-g: id out of range", s);
+		bad(user ? "-u: id out of range" : "-g: id out of range", s,
+		    user ? "6ab7ff14" : "6ab7ff15");
 	return v;
 }
 
@@ -471,8 +485,8 @@ primary(void)
 			char m[128];
 
 			(void)regerror(i, &nd[n].re, m, sizeof m);
-			(void)fprintf(stderr, "%s: -r: %s\n", prog, m);
-			bad("-r: bad regular expression", a);
+			ERR("-r: bad regular expression", a, m, "6ab7ff09");
+			exit(ST_USAGE);
 		}
 		return n;
 	case 't':
@@ -481,18 +495,18 @@ primary(void)
 			const char *q = strchr("fdlpsbc", *p);
 
 			if (q == NULL)
-				bad("-t: types are f d l p s b c", a);
+				bad("-t: types are f d l p s b c", a, "6ab7ff0a");
 			nd[n].tmask |= 1u << (q - "fdlpsbc");
 		}
 		if (*a == '\0')
-			bad("-t: types are f d l p s b c", a);
+			bad("-t: types are f d l p s b c", a, "6ab7ff0a");
 		return n;
 	case 'd': {
 		long lo, hi;
 
 		a = arg1();
 		if ((p = num(a, &cmp, &v)) == NULL || *p || v > LONG_MAX - 1)
-			bad("-d: depth is [+-]N", a);
+			bad("-d: depth is [+-]N", a, "6ab7ff0b");
 		lo = cmp == '+' ? (long)v + 1 : cmp == '-' ? 0 : (long)v;
 		hi = cmp == '-' ? (long)v - 1 : cmp == '+' ? LONG_MAX : (long)v;
 		if (lo > mindepth)
@@ -505,9 +519,10 @@ primary(void)
 		n = mk(N_SIZE, -1, -1);
 		a = arg1();
 		if ((p = num(a, &nd[n].cmp, &v)) == NULL)
-			bad("-s: size is [+-]N[ckMGT]", a);
+			bad("-s: size is [+-]N[ckMGT]", a, "6ab7ff0c");
 		nd[n].num = mul(v, suffix(p, "ckKmMgGtT", szm, 1,
-		    "-s: size is [+-]N[ckMGT]", a), "-s: size overflows", a);
+		    "-s: size is [+-]N[ckMGT]", a, "6ab7ff0c"),
+		    "-s: size overflows", a, "6ab7ff0d");
 		need_stat = 1;
 		return n;
 	case 'm': case 'a': case 'c': case 'b':
@@ -515,20 +530,20 @@ primary(void)
 		nd[n].tsel = t[1];
 		a = arg1();
 		if ((p = num(a, &nd[n].cmp, &v)) == NULL)
-			bad("time is [+-]N[smhdw]", a);
+			bad("time is [+-]N[smhdw]", a, "6ab7ff0e");
 		nd[n].unit = suffix(p, "smhdw", tm, 86400,
-		    "time is [+-]N[smhdw]", a);
+		    "time is [+-]N[smhdw]", a, "6ab7ff0e");
 		nd[n].num = v;
-		(void)mul(v, nd[n].unit, "time overflows", a);
+		(void)mul(v, nd[n].unit, "time overflows", a, "6ab7ff0f");
 		if (v * nd[n].unit > (uintmax_t)INTMAX_MAX)
-			bad("time overflows", a);
+			bad("time overflows", a, "6ab7ff0f");
 		need_stat = 1;
 		return n;
 	case 'w':
 		n = mk(N_NEWER, -1, -1);
 		a = arg1();
 		if ((opt_H || opt_L ? stat(a, &sb) : lstat(a, &sb)) == -1)
-			bad("-w: cannot stat", a);
+			bad("-w: cannot stat", a, "6ab7ff10");
 		nd[n].ref = MTIM(&sb);
 		need_stat = 1;
 		return n;
@@ -548,7 +563,8 @@ primary(void)
 		n = mk(t[1] == 'l' ? N_LINKS : N_INUM, -1, -1);
 		a = arg1();
 		if ((p = num(a, &nd[n].cmp, &nd[n].num)) == NULL || *p)
-			bad(t[1] == 'l' ? "-l: links is [+-]N" : "-i: inode is [+-]N", a);
+			bad(t[1] == 'l' ? "-l: links is [+-]N" : "-i: inode is [+-]N", a,
+			    t[1] == 'l' ? "6ab7ff16" : "6ab7ff17");
 		need_stat = 1;
 		return n;
 	case 'e':
@@ -572,21 +588,21 @@ primary(void)
 		nd[n].argc = (int)(&tok[ti] - nd[n].argv);
 		nd[n].plus = tok[ti++][0] == '+';
 		if (nd[n].argc == 0 || (nd[n].plus && nd[n].argc == 1))
-			bad("missing command after", t);
+			bad("missing command after", t, "6ab7ff18");
 		for (i = 0; i < nd[n].argc; i++) {
 			if (strstr(nd[n].argv[i], "{}") && strcmp(nd[n].argv[i], "{}"))
-				bad("{} must be a whole argument", nd[n].argv[i]);
+				bad("{} must be a whole argument", nd[n].argv[i], "6ab7ff19");
 			if (nd[n].plus && i < nd[n].argc - 1 &&
 			    !strcmp(nd[n].argv[i], "{}"))
-				bad("with +, {} may appear only once, last", t);
+				bad("with +, {} may appear only once, last", t, "6ab7ff1a");
 			if (i == 0 && !strcmp(nd[n].argv[i], "{}"))
-				bad("{} cannot be the command", t);
+				bad("{} cannot be the command", t, "6ab7ff1b");
 		}
 		if (t[1] == 'x' && strchr(nd[n].argv[0], '/') && nd[n].argv[0][0] != '/')
-			bad("-x: command must be absolute or found in PATH", nd[n].argv[0]);
+			bad("-x: command must be absolute or found in PATH", nd[n].argv[0], "6ab7ff1c");
 		return n;
 	}
-	bad("unknown primary", t);
+	bad("unknown primary", t, "6ab7ff03");
 	return -1;
 }
 
@@ -596,7 +612,7 @@ parse_not(void)
 	int n;
 
 	if (ti >= ntok)
-		bad("expression ends early", ntok ? tok[ntok - 1] : NULL);
+		bad("expression ends early", ntok ? tok[ntok - 1] : NULL, "6ab7ff06");
 	if (!strcmp(tok[ti], "!")) {
 		ti++;
 		n = parse_not();
@@ -605,15 +621,15 @@ parse_not(void)
 	if (!strcmp(tok[ti], "(")) {
 		ti++;
 		if (ti < ntok && !strcmp(tok[ti], ")"))
-			bad("empty ( )", NULL);
+			bad("empty ( )", NULL, "6ab7ff07");
 		n = parse_or();
 		if (ti >= ntok || strcmp(tok[ti], ")"))
-			bad("missing )", NULL);
+			bad("missing )", NULL, "6ab7ff08");
 		ti++;
 		return n;
 	}
 	if (!strcmp(tok[ti], ")") || !strcmp(tok[ti], "-o"))
-		bad("unexpected", tok[ti]);
+		bad("unexpected", tok[ti], "6ab7ff05");
 	return primary();
 }
 
@@ -647,12 +663,11 @@ check_path(void)
 	const char *p = getenv("PATH"), *q;
 
 	if (p == NULL || *p == '\0')
-		die(ST_ENV, "-x: PATH is empty", NULL, 0);
+		die(ST_ENV, "-x: PATH is empty", NULL, NULL, "6ab7ff28");
 	for (;;) {
 		q = strchr(p, ':');
 		if (*p != '/')
-			die(ST_ENV, "-x: refusing relative or empty PATH element",
-			    getenv("PATH"), 0);
+			die(ST_ENV, "-x: refusing relative or empty PATH element", getenv("PATH"), NULL, "6ab7ff29");
 		if (q == NULL)
 			break;
 		p = q + 1;
@@ -722,13 +737,13 @@ ensure_fd(size_t d, const char *shown)
 	fd = openat(pfd, L->name, O_RDONLY | O_DIRECTORY | O_CLOEXEC |
 	    (L->follow ? 0 : O_NOFOLLOW));
 	if (fd == -1) {
-		warnf("cannot open", shown, errno);
+		ERR("cannot open", shown, strerror(errno), "6ab7ff30");
 		status |= errno == ELOOP || errno == ENOTDIR ? ST_RACE : ST_NODE;
 		return -1;
 	}
 	if (fstat(fd, &sb) == -1 || sb.st_dev != L->dev || sb.st_ino != L->ino) {
 		(void)close(fd);
-		warnf("changed during walk, skipped", shown, 0);
+		ERR("changed during walk, skipped", shown, NULL, "6ab7ff31");
 		status |= ST_RACE;
 		return -1;
 	}
@@ -755,12 +770,12 @@ load(struct ent *e)
 
 		if (!follow ||
 		    fstatat(pfd, nm, &e->st, AT_SYMLINK_NOFOLLOW) == -1) {
-			warnf("cannot stat", e->path, err);
+			ERR("cannot stat", e->path, strerror(err), "6ab7ff32");
 			status |= ST_NODE;
 			return -1;
 		}
 		if (err == ELOOP) {	/* dangling is fine, a loop is reported */
-			warnf("symlink loop", e->path, err);
+			WRN("symlink loop", e->path, strerror(err), "6ab7ff33");
 			status |= ST_LOOP;
 		}
 	}
@@ -828,10 +843,10 @@ run(char *const *av, int dirfd, const char *dir)
 
 	xflush();
 	if (pipe(pfd) == -1)
-		die(ST_ENV, "pipe", NULL, errno);
+		die(ST_ENV, "pipe", NULL, strerror(errno), "6ab7ff23");
 	(void)fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
 	if ((pid = fork()) == -1)
-		die(ST_ENV, "fork", NULL, errno);
+		die(ST_ENV, "fork", NULL, strerror(errno), "6ab7ff24");
 	if (pid == 0) {
 		(void)close(pfd[0]);
 		if ((dirfd >= 0 && fchdir(dirfd) == -1) ||
@@ -851,9 +866,9 @@ run(char *const *av, int dirfd, const char *dir)
 	(void)close(pfd[0]);
 	while (waitpid(pid, &st, 0) == -1)
 		if (errno != EINTR)
-			die(ST_ENV, "waitpid", NULL, errno);
+			die(ST_ENV, "waitpid", NULL, strerror(errno), "6ab7ff25");
 	if (r == (ssize_t)sizeof err) {
-		warnf("cannot execute", av[0], err);
+		ERR("cannot execute", av[0], strerror(err), "6ab7ff34");
 		status |= ST_EXEC;
 		return -1;
 	}
@@ -967,6 +982,9 @@ static int
 p_time(struct node *n, struct ent *e)
 {
 	intmax_t age, t;
+#if !(defined(__APPLE__) || defined(__NetBSD__) || defined(__FreeBSD__))
+	static int warned_btime;	/* -b cannot be answered: warn once */
+#endif
 
 	if (n->tsel == 'm')
 		t = e->st.st_mtime;
@@ -989,13 +1007,13 @@ p_time(struct node *n, struct ent *e)
 		    opt_L || (opt_H && !e->depth) ? 0 : AT_SYMLINK_NOFOLLOW,
 		    STATX_BTIME, &sx) == -1 || !(sx.stx_mask & STATX_BTIME)) {
 			if (!warned_btime++)
-				warnf("birth time unavailable, -b is false", e->path, 0);
+				WRN("birth time unavailable, -b is false", e->path, NULL, "6ab7ff35");
 			return 0;
 		}
 		t = sx.stx_btime.tv_sec;
 #else
 		if (!warned_btime++)
-			warnf("birth time unsupported on this platform", NULL, 0);
+			WRN("birth time unsupported on this platform", NULL, NULL, "6ab7ff36");
 		return 0;
 #endif
 	}
@@ -1025,14 +1043,14 @@ p_empty(struct ent *e)
 	fd = openat(pfd, e->depth ? e->base : e->path, O_RDONLY | O_DIRECTORY |
 	    O_CLOEXEC | (opt_L || (opt_H && !e->depth) ? 0 : O_NOFOLLOW));
 	if (fd == -1) {
-		warnf("cannot open", e->path, errno);
+		ERR("cannot open", e->path, strerror(errno), "6ab7ff30");
 		status |= ST_NODE;
 		return 0;
 	}
 	if (fstat(fd, &sb) == -1 || sb.st_dev != e->st.st_dev ||
 	    sb.st_ino != e->st.st_ino || (dp = fdopendir(fd)) == NULL) {
 		(void)close(fd);
-		warnf("changed during walk, skipped", e->path, 0);
+		ERR("changed during walk, skipped", e->path, NULL, "6ab7ff31");
 		status |= ST_RACE;
 		return 0;
 	}
@@ -1055,13 +1073,13 @@ p_delete(struct ent *e)
 		if (!strcmp(b, "."))
 			return 1;	/* find skips . silently */
 		if (!strcmp(b, "..") || !strcmp(b, "/")) {
-			warnf("refusing to delete", e->path, 0);
+			ERR("refusing to delete", e->path, NULL, "6ab7ff37");
 			status |= ST_NODE;
 			return 0;
 		}
 		if (lstat(e->path, &sb) == -1 ||
 		    unlinkat(AT_FDCWD, e->path, S_ISDIR(sb.st_mode) ? AT_REMOVEDIR : 0)) {
-			warnf("cannot delete", e->path, errno);
+			ERR("cannot delete", e->path, strerror(errno), "6ab7ff38");
 			status |= ST_NODE;
 			return 0;
 		}
@@ -1070,7 +1088,7 @@ p_delete(struct ent *e)
 	if (ensure_fd(e->depth - 1, NULL) < 0)
 		return 0;
 	if (unlinkat(lv[e->depth - 1].fd, b, etype(e) == 'd' ? AT_REMOVEDIR : 0)) {
-		warnf("cannot delete", e->path, errno);
+		ERR("cannot delete", e->path, strerror(errno), "6ab7ff38");
 		status |= ST_NODE;
 		return 0;
 	}
@@ -1181,7 +1199,7 @@ walk_dir(struct ent *e)
 	 * the walk never holds a DIR stream across recursion */
 	if ((dfd = fcntl(fd, F_DUPFD_CLOEXEC, 0)) == -1 ||
 	    (dp = fdopendir(dfd)) == NULL) {
-		warnf("cannot read", e->path, errno);
+		ERR("cannot read", e->path, strerror(errno), "6ab7ff39");
 		status |= ST_NODE;
 		goto done;
 	}
@@ -1205,7 +1223,7 @@ walk_dir(struct ent *e)
 		blen += len;
 	}
 	if (errno) {
-		warnf("cannot read", e->path, errno);
+		ERR("cannot read", e->path, strerror(errno), "6ab7ff39");
 		status |= ST_NODE;
 	}
 	(void)closedir(dp);
@@ -1273,7 +1291,7 @@ visit(struct ent *e)
 	if (e->have_st && S_ISDIR(e->st.st_mode))
 		for (i = 0; i < e->depth && i < nlv; i++)
 			if (lv[i].dev == e->st.st_dev && lv[i].ino == e->st.st_ino) {
-				warnf("filesystem loop, skipped", e->path, 0);
+				WRN("filesystem loop, skipped", e->path, NULL, "6ab7ff3a");
 				status |= ST_LOOP;
 				return;
 			}
@@ -1440,6 +1458,9 @@ static const char *const manual[] = {
 "    32  node changed between listing and opening; skipped\n"
 "  A -x or -j ... ; command that exits nonzero is only false.\n"
 "\n"
+"  On stderr, errors as '>>> ff : ...' and warnings as '^^^ ff : ...',\n"
+"  each ending in a hex tag naming the message.\n"
+"\n"
 "DIFFERENCES\n"
 "  From NetBSD find: one-letter switches; -r is unanchored; -s is bytes\n"
 "  with no rounding; times compare seconds, not rounded days; -d is a\n"
@@ -1462,6 +1483,17 @@ static const char *const manual[] = {
 "  platforms use the C library.\n"
 "  Names are compared as bytes: no Unicode normalization, so on Darwin\n"
 "  HFS+ a precomposed pattern does not match a decomposed name.\n"
+"\n",
+"HISTORY\n"
+"  org 6ab7fec8 20260926 102008 PDT Sat 10:20 AM 26 Sep 2026\n"
+"      owned openat walker with dev/ino verification; one-letter\n"
+"      grammar; -x execdir, -j exec, -delete through the verified parent;\n"
+"      getent ids on Linux; tty escaping; status bitmask; chkerr/chkwrn\n"
+"      diagnostics; bash translator ff.fn.bash for the native find.\n"
+"\n"
+"COPYRIGHT\n"
+"  (c) 2026 George Georgalis <george@iuxta.com>\n"
+"  Unlimited use with attribution.\n"
 };
 
 static void
@@ -1542,7 +1574,7 @@ main(int argc, char **argv)
 			put_help(1);
 		if (!inexpr && !is_exprtok(a)) {
 			if (a[0] == '-' && !endopt)
-				bad("unknown option", a);
+				bad("unknown option", a, "6ab7ff01");
 			paths[npaths++] = argv[i];
 			continue;
 		}
@@ -1550,7 +1582,7 @@ main(int argc, char **argv)
 		tok[ntok++] = argv[i];
 		if (is_prim(a, P_ARG)) {
 			if (++i >= argc)
-				bad("missing argument for", a);
+				bad("missing argument for", a, "6ab7ff02");
 			tok[ntok++] = argv[i];
 		} else if (is_prim(a, P_EXEC)) {
 			for (i++; i < argc; i++) {
@@ -1560,21 +1592,22 @@ main(int argc, char **argv)
 					break;
 			}
 			if (i >= argc)
-				bad("missing ; or {} + after", a);
+				bad("missing ; or {} + after", a, "6ab7ff1d");
 		} else if (!is_exprtok(a))
-			bad(a[0] == '-' ? "unknown primary" : "unexpected word", a);
+			bad(a[0] == '-' ? "unknown primary" : "unexpected word", a,
+			    a[0] == '-' ? "6ab7ff03" : "6ab7ff04");
 	}
 	if (ntok) {
 		root = parse_or();
 		if (ti < ntok)
-			bad("unexpected", tok[ti]);
+			bad("unexpected", tok[ti], "6ab7ff05");
 	}
 	if (!has_action(root))
 		root = root < 0 ? mk(N_PRINT, -1, -1) :
 		    mk(N_AND, root, mk(N_PRINT, -1, -1));
 	for (i = 0; i < nnd; i++)
 		if (nd[i].type == N_DELETE && opt_L)
-			bad("-delete is refused with -L", NULL);
+			bad("-delete is refused with -L", NULL, "6ab7ff1e");
 	for (i = 0; i < nnd; i++)
 		if (nd[i].type == N_EXECDIR && !strchr(nd[i].argv[0], '/'))
 			useenv = 2;
@@ -1607,7 +1640,7 @@ main(int argc, char **argv)
 		paths[npaths++] = ".";
 	for (i = 0; i < npaths && !quitting; i++) {
 		if (paths[i][0] == '\0') {
-			warnf("empty path", NULL, 0);
+			ERR("empty path", NULL, NULL, "6ab7ff3b");
 			status |= ST_NODE;
 			continue;
 		}
