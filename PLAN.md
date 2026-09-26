@@ -1,6 +1,6 @@
 # ff --- functional find: plan r2 (approved 20260926)
 
-<!-- draft 20260926; model: claude-6ab7/cksh (cksh.c + cksh.fn.bash + makefile + test.sh) -->
+<!-- org 6ab7fec8 20260926 102008 PDT Sat 10:20 AM 26 Sep 2026; model: cksh (cksh.c + cksh.fn.bash + makefile + test.sh) -->
 
 ## Context
 
@@ -14,11 +14,9 @@ development model and solution profile, carried forward whole:
   by a parity section in `test.sh`;
 - `-h` short usage, `--help` full manual compiled in as chunked literals,
   man page derived from `--help` at build time (cksh `cksh.1` rule);
-- exit status as an accumulating bitmask; one diagnostic path (`warnf`/`die`);
+- exit status as an accumulating bitmask; one diagnostic path (`msg`/`die`),
+  chkerr/chkwrn format with a hex tag per message;
 - makefile restricted to the GNU make / bmake / Apple make intersection.
-
-The repo (`/home/user/ff`, branch `claude/modest-hypatia-4r78m8`) holds only
-README.md; everything below is new.
 
 ## Finding that reshapes the shell companion: Lua
 
@@ -232,3 +230,13 @@ Where the build departs from or fills a gap in the plan above:
   warning is gone. `/etc/passwd` is never parsed: it is not authoritative
   under LDAP, sssd or systemd-homed. No getent: status 2, numeric ids work.
   Darwin and NetBSD keep libc `getpwnam`/`getgrnam`.
+- r4: cksh conventions adopted. The `org` revision is reset to 6ab7fec8
+  (20260926 102008 PDT) in every header, the manual HISTORY and README
+  History; the earlier 6ab77d4a stamps are dropped. Diagnostics use the
+  chkerr (`>>> `) and chkwrn (`^^^ `) format, `ff : what 'name'[: why]
+  (tag)`, one line, with hex tags 6ab7ff01-6ab7ff45; usage messages and
+  tags are identical in ff.fn.bash. The bash function body is a subshell,
+  so only `ff` enters the caller's namespace. The manual gains HISTORY and
+  COPYRIGHT. `make install` defaults PREFIX to /usr/local for root, else
+  $HOME. `warned_btime` is declared only where -b can warn (unused-variable
+  warning on Darwin and NetBSD).
