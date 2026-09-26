@@ -41,9 +41,12 @@ make. It installs `bin/ff`, `man1/ff.1`, and `share/ff/ff.fn.bash`.
 Linking by platform:
 
 - Linux and NetBSD: `-static`, falling back to dynamic linking when no
-  static libc is installed. With static glibc, `-u` and `-g` name lookups
-  (`getpwnam`, `getgrnam`) need the matching glibc's NSS modules at run
-  time, and the linker warns about it. Numeric ids always work.
+  static libc is installed. On Linux, `-u` and `-g` names are resolved by
+  running the host's `getent` (`/usr/bin/getent` or `/bin/getent`, never
+  looked up in `PATH`), not by `getpwnam`, which a static glibc binary
+  cannot load NSS modules for. `/etc/passwd` is never read directly: under
+  LDAP, sssd or systemd-homed it is not the user database. Without
+  `getent`, a name exits 2 and a numeric id still works.
 - Darwin: dynamic, against libSystem only. Apple ships no static libSystem,
   so this is as far as linking can go there.
 
@@ -179,7 +182,7 @@ A path operand beginning with `-` also exits 2.
 
 ## Verified
 
-- `make test` passes, 182 cases, under GNU make on Linux (glibc 2.39): gcc
+- `make test` passes, 188 cases, under GNU make on Linux (glibc 2.39): gcc
   and clang, a gcc build with ASan and UBSan, and as root and non-root.
   Root skips the unreadable-directory case.
 - The walk matches GNU find 4.9 on each primary it shares.

@@ -351,8 +351,10 @@ _ff_manual () { # ff --help, identical to ff.c manual
 	  ff -0 . -t f | xargs -0 cksh    hash everything
 
 	NOTES
-	  -u and -g resolve names through the C library; a static Linux build
-	  may be unable to load NSS modules, so prefer numeric ids there.
+	  -u and -g resolve names on Linux by running getent from /usr/bin or
+	  /bin, so a static binary sees the same users as the host; without
+	  getent a name is an error (2) and a numeric id still works. Other
+	  platforms use the C library.
 	  Names are compared as bytes: no Unicode normalization, so on Darwin
 	  HFS+ a precomposed pattern does not match a decomposed name.
 	eof

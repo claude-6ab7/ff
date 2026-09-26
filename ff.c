@@ -3,7 +3,11 @@
  * rev 6ab77d4a 20260926 initial; companion ff.fn.bash, model cksh
  * (c) 2026 George Georgalis <george@iuxta.com> Unlimited use with attribution.
  *
- * Dependency posture: none beyond libc. The directory walker is owned rather
+ * Dependency posture: none beyond libc. On Linux, -u and -g names resolve
+ * through getent(1) at a fixed path, never getpwnam(3): a static glibc
+ * binary cannot load NSS modules reliably, and /etc/passwd alone is not the
+ * user database under LDAP, sssd or systemd-homed. No getent is an error.
+ * The directory walker is owned rather
  * than fts(3): musl ships no fts, and here every directory is opened with
  * openat(2) relative to its parent's descriptor and verified by dev/ino
  * against the stat taken while listing, so no path is re-resolved after it
@@ -30,10 +34,14 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <fnmatch.h>
+#if !defined(__linux__)
 #include <grp.h>
+#endif
 #include <inttypes.h>
 #include <limits.h>
+#if !defined(__linux__)
 #include <pwd.h>
+#endif
 #include <regex.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -307,28 +315,101 @@ parse_mode(const char *s, const char *arg)
 	return (mode_t)m;
 }
 
+#if defined(__linux__)
+/* id field of "getent passwd|group name": name:pw:id:... ; the host's own
+ * dynamically linked getent consults NSS as configured, which this binary
+ * may not. Exit 2 from getent is "no such key". */
+static uintmax_t
+getent_id(const char *db, const char *s, const char *what)
+{
+	static const char *const bin[] = { "/usr/bin/getent", "/bin/getent" };
+	char buf[4096], *p, *av[5];
+	const char *q;
+	size_t n = 0, i, len = strlen(s);
+	int pfd[2], st, cmp;
+	uintmax_t v = 0;
+	ssize_t r;
+	pid_t pid;
+
+	for (i = 0; i < sizeof bin / sizeof *bin && access(bin[i], X_OK); i++)
+		;
+	if (i == sizeof bin / sizeof *bin)
+		die(ST_ENV, "no getent to resolve names, use a numeric id", s, 0);
+	av[0] = (char *)"getent";
+	av[1] = (char *)db;
+	av[2] = (char *)"--";
+	av[3] = (char *)s;
+	av[4] = NULL;
+	xflush();
+	if (pipe(pfd) == -1)
+		die(ST_ENV, "pipe", NULL, errno);
+	if ((pid = fork()) == -1)
+		die(ST_ENV, "fork", NULL, errno);
+	if (pid == 0) {
+		int nul = open("/dev/null", O_RDWR);
+
+		(void)close(pfd[0]);
+		if (dup2(pfd[1], 1) == -1 || (nul >= 0 && dup2(nul, 2) == -1))
+			_exit(127);
+		(void)execv(bin[i], av);
+		_exit(127);
+	}
+	(void)close(pfd[1]);
+	while (n < sizeof buf - 1 &&
+	    ((r = read(pfd[0], buf + n, sizeof buf - 1 - n)) > 0 ||
+	    (r == -1 && errno == EINTR)))
+		n += r > 0 ? (size_t)r : 0;
+	(void)close(pfd[0]);
+	while (waitpid(pid, &st, 0) == -1)
+		if (errno != EINTR)
+			die(ST_ENV, "waitpid", NULL, errno);
+	buf[n] = '\0';
+	if (WIFEXITED(st) && WEXITSTATUS(st) == 2)
+		bad(what, s);
+	if (!WIFEXITED(st) || WEXITSTATUS(st) != 0)
+		die(ST_ENV, "getent failed resolving", s, 0);
+	/* first line must name s exactly, then two fields to the id */
+	if (strncmp(buf, s, len) || buf[len] != ':' ||
+	    (p = strchr(buf + len + 1, ':')) == NULL ||
+	    (q = num(p + 1, &cmp, &v)) == NULL || cmp || *q != ':')
+		die(ST_ENV, "unexpected getent output for", s, 0);
+	return v;
+}
+#endif
+
 static uintmax_t
 parse_id(const char *s, int user)
 {
-	struct passwd *pw;
-	struct group *gr;
 	uintmax_t v;
 	const char *p;
 	int cmp;
 
-	if ((p = num(s, &cmp, &v)) != NULL && *p == '\0' && cmp == 0) {
-		if (v > (user ? (uintmax_t)(uid_t)-1 : (uintmax_t)(gid_t)-1))
-			bad(user ? "-u: id out of range" : "-g: id out of range", s);
-		return v;
+	if ((p = num(s, &cmp, &v)) != NULL && *p == '\0' && cmp == 0)
+		;
+	else if (*s == '\0' || *s == '-' || strpbrk(s, ":\n"))
+		bad(user ? "-u: no such user" : "-g: no such group", s);
+	else {
+#if defined(__linux__)
+		v = getent_id(user ? "passwd" : "group", s,
+		    user ? "-u: no such user" : "-g: no such group");
+#else
+		struct passwd *pw;
+		struct group *gr;
+
+		if (user) {
+			if ((pw = getpwnam(s)) == NULL)
+				bad("-u: no such user", s);
+			v = pw->pw_uid;
+		} else {
+			if ((gr = getgrnam(s)) == NULL)
+				bad("-g: no such group", s);
+			v = gr->gr_gid;
+		}
+#endif
 	}
-	if (user) {
-		if ((pw = getpwnam(s)) == NULL)
-			bad("-u: no such user", s);
-		return pw->pw_uid;
-	}
-	if ((gr = getgrnam(s)) == NULL)
-		bad("-g: no such group", s);
-	return gr->gr_gid;
+	if (v > (user ? (uintmax_t)(uid_t)-1 : (uintmax_t)(gid_t)-1))
+		bad(user ? "-u: id out of range" : "-g: id out of range", s);
+	return v;
 }
 
 static int
@@ -1375,8 +1456,10 @@ static const char *const manual[] = {
 "  ff -0 . -t f | xargs -0 cksh    hash everything\n"
 "\n"
 "NOTES\n"
-"  -u and -g resolve names through the C library; a static Linux build\n"
-"  may be unable to load NSS modules, so prefer numeric ids there.\n"
+"  -u and -g resolve names on Linux by running getent from /usr/bin or\n"
+"  /bin, so a static binary sees the same users as the host; without\n"
+"  getent a name is an error (2) and a numeric id still works. Other\n"
+"  platforms use the C library.\n"
 "  Names are compared as bytes: no Unicode normalization, so on Darwin\n"
 "  HFS+ a precomposed pattern does not match a decomposed name.\n"
 };

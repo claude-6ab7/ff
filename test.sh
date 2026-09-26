@@ -56,7 +56,8 @@ for pair in \
   "t ( -n a -o -n em ) -t f|t ( -name a -o -name em ) -type f" "t ! -t d|t ! -type d" \
   "t -d 0|t -maxdepth 0" "t -d -2|t -maxdepth 1" "t -d +0|t -mindepth 1" "t -d 1|t -mindepth 1 -maxdepth 1" \
   "t -d +1 -d -3|t -mindepth 2 -maxdepth 2" "-L t -t d|-L t -type d" "-H t/ld|-H t/ld" "t/ld|t/ld" \
-  "-D t|t -depth" "t -u `id -u`|t -uid `id -u`" "t -g `id -g`|t -gid `id -g`"
+  "-D t|t -depth" "t -u `id -u`|t -uid `id -u`" "t -g `id -g`|t -gid `id -g`" \
+  "t -u `id -un`|t -user `id -un`" "t -g `id -gn`|t -group `id -gn`" "/etc -d -2 -u root|/etc -maxdepth 1 -user root"
 do
   ff_args=${pair%%|*}; find_args=${pair#*|}
   set -f
@@ -164,7 +165,7 @@ eq "pipe raw ESC" "$esc" "`"$B" t -n 'x*'`"
 
 # --- grammar: [options] [path ...] [expression] ---
 for o in "-q t" "t -n" "t -t q" "t -t ''" "t -d x" "t -s 1q" "t -s 1kk" "t -m 1y" "t -k 999" \
-    "t -k u+q" "t -u nosuchuser_ff" "t -g nosuchgroup_ff" "t -l x" "t -w t/nope" "t (" "t ( )" \
+    "t -k u+q" "t -u nosuchuser_ff" "t -g nosuchgroup_ff" "t -u -root" "t -u a:b" "t -u ''" "t -l x" "t -w t/nope" "t (" "t ( )" \
     "t )" "t -o -f" "t -n a -o" "t !" "t -r [" "t -x echo {}" "t -x {} ;" "t -x ;" \
     "t -x echo a{} ;" "t -j echo {} {} +" "t -x ./x ;" "t -y" "--nope" "t -n a b"
 do

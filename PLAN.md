@@ -226,3 +226,9 @@ Where the build departs from or fills a gap in the plan above:
   beside `-x` (execdir). `-j` skips the relative-PATH guard (cwd is ff's own,
   as with find `-exec`); `+` batches across directories. Test: `-j` and `-x`
   yield the same file set, `{}` forms differ (`./a/b` vs `./b`).
+- r3: `-f` confirmed as print. `-u`/`-g` names on Linux resolve through
+  `getent` at a fixed path (passwd/group database as the host configures
+  it); `getpwnam` is no longer linked there, so the static-NSS link
+  warning is gone. `/etc/passwd` is never parsed: it is not authoritative
+  under LDAP, sssd or systemd-homed. No getent: status 2, numeric ids work.
+  Darwin and NetBSD keep libc `getpwnam`/`getgrnam`.
