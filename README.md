@@ -102,7 +102,9 @@ its `+` and `-` keep ff's sense of more and less:
   `+` has, `-` lacks, no sign means `+`. Named classes must each satisfy a
   clause; with no class, `+x` means someone may execute and `-x` no one
   may. `X` is execute that only a directory satisfies, `s` setuid (`u`) or
-  setgid (`g`), `t` the sticky bit.
+  setgid (`g`), `t` the sticky bit. With no class, each class is tested
+  with only the bits it can hold, so `-k +rs` holds for a 0644 file
+  (other has `r` and can hold no `s`); `-k u+rs` needs both in one class.
 
 ```
 ff . -t f -k o+w        world-writable files
@@ -216,7 +218,7 @@ A path operand beginning with `-` also exits 2.
 
 ## Verified
 
-- `make test` passes, 267 cases, under GNU make on Linux (glibc 2.39): gcc
+- `make test` passes, 274 cases, under GNU make on Linux (glibc 2.39): gcc
   and clang, a gcc build with ASan and UBSan, and as root and non-root.
   Root skips the unreadable-directory case. gcc and clang compile ff.c
   clean under `-Werror`, including a syntax check of the Darwin branch.
@@ -232,10 +234,16 @@ See `PLAN.md` for the design record and the decisions log.
 ```
 rev 6ab89f43 20260926 214451 PDT Sat 09:44 PM 26 Sep 2026
     -k permission query: octal exact, +mode at least, -mode at most;
-    symbolic clauses + has, - lacks, with X s t; -not
+    symbolic clauses + has, - lacks, with X s t; -not; diagnostics that
+    state a rule end in "not" before the rejected value
 org 6ab7fec8 20260926 102008 PDT Sat 10:20 AM 26 Sep 2026
     owned openat walker with dev/ino verification; one-letter grammar;
     -x execdir, -j exec, -delete through the verified parent; getent ids
     on Linux; tty escaping; status bitmask; chkerr/chkwrn diagnostics;
     bash translator ff.fn.bash for the native find
 ```
+
+## Copyright
+
+(c) 2026 George Georgalis <george@iuxta.com>
+Unlimited use with attribution.

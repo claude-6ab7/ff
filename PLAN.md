@@ -1,5 +1,8 @@
 # ff --- functional find: plan r2 (approved 20260926)
 
+(c) 2026 George Georgalis <george@iuxta.com>
+Unlimited use with attribution.
+
 <!-- org 6ab7fec8 20260926 102008 PDT Sat 10:20 AM 26 Sep 2026; model: cksh (cksh.c + cksh.fn.bash + makefile + test.sh) -->
 
 ## Context
@@ -251,4 +254,8 @@ Where the build departs from or fills a gap in the plan above:
   `!`. The manual's OPERATORS gains shell-quoting guidance and a
   two-directory prune example. ff.fn.bash writes every clause with plain
   `-perm -BITS`, "lacks" as one `! -perm -BIT` per bit, so no dialect
-  split.
+  split. Review follow-up in the same rev: `-k +rs` holding through the
+  other class (which holds no s) is documented; diagnostics that state a
+  rule end in ", not" (or "after", "in", "of") before the quoted value,
+  and the time rule names its primary (`-m: time is ...`); copyright
+  and license added to README and PLAN.

@@ -2,7 +2,7 @@
 
 ff () ( # functional find: ff grammar run by the host's native find; companion ff.c
   # rev 6ab89f43 20260926 214451 PDT Sat 09:44 PM 26 Sep 2026
-  #     -k permission query (octal at least/at most, symbolic has/lacks, X s t), -not
+  #     -k permission query (at least/at most, has/lacks, X s t), -not, "not" diagnostics
   # org 6ab7fec8 20260926 102008 PDT Sat 10:20 AM 26 Sep 2026
   #     translator for BSD (-E) and GNU (-regextype) find dialects, tty escaping,
   #     chkerr/chkwrn diagnostics, subshell namespace; companion C binary ff.c
@@ -49,7 +49,7 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
         [ -n "$w" ] && [[ "$w" != *a* ]] && [[ "$w" != *"${L[c]}"* ]] && continue || :
         case "${p:i:1}" in r) b=${R[c]} ;; w) b=${W[c]} ;; x|X) b=${E[c]} ;; s) b=${S[c]} ;; t) b=${T[c]} ;; esac
         [[ "${p:i:1}" == [st] ]] && ((b==0)) && [ -n "$w" ] && [[ "$w" != *a* ]] \
-          && { _ffbad "-k: s is for u or g, t is for o" 6ab7ff46 "$v" ; return 1 ;} || :
+          && { _ffbad "-k: s is for u or g, t is for o, not" 6ab7ff46 "$v" ; return 1 ;} || :
         cb[c]=$((cb[c] | b)) ; [ "${p:i:1}" = X ] && X=1 || :
       done ; done
       all=$((cb[0] | cb[1] | cb[2]))
@@ -202,6 +202,9 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	              clause with X is false for anything else. s is setuid
 	              with u, setgid with g, either with no class, both with
 	              a; t is the sticky (/tmp) bit, alone or with o.
+	              With no class, each class is tested with only the bits
+	              it can hold, so -k +rs holds when other has r, since
+	              other has no s; name the class to need both: -k u+rs.
 	                -k u+x           owner may execute
 	                -k x             someone may execute (same as +x)
 	                -k -x            no one may execute
@@ -309,6 +312,7 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	  rev 6ab89f43 20260926 214451 PDT Sat 09:44 PM 26 Sep 2026
 	      -k is a permission query: octal exact, +mode at least, -mode
 	      at most; symbolic clauses + has, - lacks, with X s t. -not.
+	      Diagnostics that state a rule end in "not" before the value.
 	  org 6ab7fec8 20260926 102008 PDT Sat 10:20 AM 26 Sep 2026
 	      owned openat walker with dev/ino verification; one-letter
 	      grammar; -x execdir, -j exec, -delete through the verified parent;
@@ -361,25 +365,25 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
             [[ "$v" =~ ^\^ ]] && v="${v#^}" || v=".*$v"
             [[ "$v" =~ [^\\]\$$|^\$$ ]] && v="${v%\$}" || v="$v.*" ;}
           [ -n "$I" ] && ex+=(-iregex "$v") || ex+=(-regex "$v") ;;
-      -t) gs=t ; [[ "$v" =~ ^[fdlpsbc]+$ ]] || { _ffbad "-t: types are f d l p s b c" 6ab7ff0a "$v" ; return 1 ;}
+      -t) gs=t ; [[ "$v" =~ ^[fdlpsbc]+$ ]] || { _ffbad "-t: types are f d l p s b c, not" 6ab7ff0a "$v" ; return 1 ;}
           ((${#v}>1)) && ex+=('(') || :
           for ((i=0; i<${#v}; i++)); do ((i)) && ex+=(-o) || : ; ex+=(-type "${v:i:1}") ; done
           ((${#v}>1)) && ex+=(')') || : ;;
       -d) gs=t ; [[ "$v" =~ ^([+-]?)([0-9]+)$ ]] && ((${#BASH_REMATCH[2]}<18)) \
-            || { _ffbad "-d: depth is [+-]N" 6ab7ff0b "$v" ; return 1 ;}
+            || { _ffbad "-d: depth is [+-]N, not" 6ab7ff0b "$v" ; return 1 ;}
           n=$((10#${BASH_REMATCH[2]})) ; s="${BASH_REMATCH[1]}"
           case "$s" in +) ((n+1>lo)) && lo=$((n+1)) || : ;;
             -) [ -z "$hi" ] || ((n-1<hi)) && hi=$((n-1)) || : ;;
             *) ((n>lo)) && lo=$n || : ; [ -z "$hi" ] || ((n<hi)) && hi=$n || : ;; esac ;;
       -s) gs=t ; [[ "$v" =~ ^([+-]?)([0-9]+)([ckKmMgGtT]?)$ ]] && ((${#BASH_REMATCH[2]}<16)) \
-            || { _ffbad "-s: size is [+-]N[ckMGT]" 6ab7ff0c "$v" ; return 1 ;}
+            || { _ffbad "-s: size is [+-]N[ckMGT], not" 6ab7ff0c "$v" ; return 1 ;}
           case "${BASH_REMATCH[3]}" in k|K) u=1024 ;; m|M) u=1048576 ;; g|G) u=1073741824 ;;
             t|T) u=1099511627776 ;; *) u=1 ;; esac
           n=$((10#${BASH_REMATCH[2]} * u))
           ex+=(-size "${BASH_REMATCH[1]}${n}c") ;;
       -m|-a|-c|-b) gs=t
           [[ "$v" =~ ^([+-]?)([0-9]+)([smhdw]?)$ ]] && ((${#BASH_REMATCH[2]}<12)) \
-            || { _ffbad "time is [+-]N[smhdw]" 6ab7ff0e "$v" ; return 1 ;}
+            || { _ffbad "${a}: time is [+-]N[smhdw], not" 6ab7ff0e "$v" ; return 1 ;}
           case "${BASH_REMATCH[3]}" in s) u=1 ;; m) u=60 ;; h) u=3600 ;; w) u=604800 ;; *) u=86400 ;; esac
           n=$((10#${BASH_REMATCH[2]})) ; s="${BASH_REMATCH[1]}"
           ((u%60==0 || n*u%60==0)) || { chkerr "ff : -${a:1} in seconds needs ff.c '$v' (6ab7ff41)" ; t=2 ;}
@@ -395,7 +399,7 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
           command find /dev/null -maxdepth 0 "$k" "$v" >/dev/null 2>&1 \
             || { _ffbad "${a}: no such ${k#-}" "$([ "$a" = -u ] && echo 6ab7ff12 || echo 6ab7ff13)" "$v" ; return 1 ;} ; ex+=("$k" "$v") ;;
       -l|-i) gs=t ; [[ "$v" =~ ^[+-]?[0-9]+$ ]] \
-            || { [ "$a" = -l ] && _ffbad "-l: links is [+-]N" 6ab7ff16 "$v" || _ffbad "-i: inode is [+-]N" 6ab7ff17 "$v" ; return 1 ;}
+            || { [ "$a" = -l ] && _ffbad "-l: links is [+-]N, not" 6ab7ff16 "$v" || _ffbad "-i: inode is [+-]N, not" 6ab7ff17 "$v" ; return 1 ;}
           [ "$a" = -l ] && ex+=(-links "$v") || ex+=(-inum "$v") ;;
       -e) gs=t ; ex+=(-empty) ;;
       -z) gs=t ; ex+=(-prune) ;;
@@ -409,28 +413,28 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
           while (($#)); do
             [ "$1" = ";" ] && break || :
             [ "$1" = "+" ] && [ "$prev" = "{}" ] && break || :
-            [[ "$1" == *"{}"* ]] && [ "$1" != "{}" ] && { _ffbad "{} must be a whole argument" 6ab7ff19 "$1" ; return 1 ;} || :
-            ((n==0)) && [ "$1" = "{}" ] && { _ffbad "{} cannot be the command" 6ab7ff1b "$a" ; return 1 ;} || :
+            [[ "$1" == *"{}"* ]] && [ "$1" != "{}" ] && { _ffbad "{} must be a whole argument, not" 6ab7ff19 "$1" ; return 1 ;} || :
+            ((n==0)) && [ "$1" = "{}" ] && { _ffbad "{} cannot be the command of" 6ab7ff1b "$a" ; return 1 ;} || :
             [ "$1" = "{}" ] && c=$((c+1)) || :
             ((n==0)) && b="$1" || :
             ex+=("$1") ; prev="$1" ; n=$((n+1)) ; shift
           done
           (($#)) || { _ffbad "missing ; or {} + after" 6ab7ff1d "$a" ; return 1 ;}
           ((n)) || { _ffbad "missing command after" 6ab7ff18 "$a" ; return 1 ;}
-          [ "$1" = "+" ] && ((c>1)) && { _ffbad "with +, {} may appear only once, last" 6ab7ff1a "$a" ; return 1 ;} || :
+          [ "$1" = "+" ] && ((c>1)) && { _ffbad "with +, {} may appear only once, last, in" 6ab7ff1a "$a" ; return 1 ;} || :
           [ "$a" = -x ] && [[ "$b" == */* ]] && [[ "$b" != /* ]] \
-            && { _ffbad "-x: command must be absolute or found in PATH" 6ab7ff1c "$b" ; return 1 ;} || :
+            && { _ffbad "-x: command must be absolute or found in PATH, not" 6ab7ff1c "$b" ; return 1 ;} || :
           [ "$a" = -x ] && [[ "$b" != */* ]] && xd=1 || :
           ex+=("$1") ; shift ;;
       *) [[ "$a" =~ ^- ]] && _ffbad "unknown primary" 6ab7ff03 "$a" || _ffbad "unexpected word" 6ab7ff04 "$a" ; return 1 ;;
     esac
     prev="$a"
   done
-  ((${#ex[@]})) && [ "$gs" = e ] && { _ffbad "expression ends early" 6ab7ff06 "$prev" ; return 1 ;} || :
+  ((${#ex[@]})) && [ "$gs" = e ] && { _ffbad "expression ends early, after" 6ab7ff06 "$prev" ; return 1 ;} || :
   ((gd)) && { _ffbad "missing )" 6ab7ff08 ; return 1 ;} || :
   [ -n "$L" ] && [[ "$act" == *r* ]] && { _ffbad "-delete is refused with -L" 6ab7ff1e ; return 1 ;} || :
   [ -n "$xd" ] && { [[ ":$PATH:" =~ ::|:[^/] ]] || [ -z "$PATH" ]; } \
-    && { chkerr "ff : -x: refusing relative or empty PATH element '$PATH' (6ab7ff29)" ; return 2 ;} || :
+    && { chkerr "ff : -x: refusing a relative or empty element in PATH '$PATH' (6ab7ff29)" ; return 2 ;} || :
   [ -n "$t" ] && return 2 || :
   # capability limits of the translator: exit 2, the binary has no such limit
   [ -n "$ls" ] && [[ "$act" =~ [fxr] ]] && { chkerr "ff : -v with other actions needs ff.c (6ab7ff43)" ; return 2 ;} || :

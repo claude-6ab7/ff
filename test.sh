@@ -3,7 +3,7 @@
 # (c) 2026 George Georgalis <george@iuxta.com> Unlimited use with attribution.
 #
 # rev 6ab89f43 20260926 214451 PDT Sat 09:44 PM 26 Sep 2026
-#     -k permission query (octal at least/at most, symbolic has/lacks, X s t), -not
+#     -k permission query (at least/at most, has/lacks, X s t), -not, "not" diagnostics
 # org 6ab7fec8 20260926 102008 PDT Sat 10:20 AM 26 Sep 2026
 #     one case per promised behavior, run via make test
 #
@@ -111,11 +111,14 @@ do
   eq "-k ${pair%%|*}" "${pair#*|}" "`kq -k "${pair%%|*}"`"
 done
 eq "-not -k go-w" "d1777 f0666" "`kq -not -k go-w`"
+# no class: each class tested with the bits it can hold; o holds no s (--help -k)
+eq "-k +rs through other" 1 "`kq -k +rs | tr ' ' '\n' | grep -cx f0644`"
+eq "-k u+rs one class" "f4755" "`kq -k u+rs`"
 eq "-not is !" "`kq ! -k go-w`" "`kq -not -k go-w`"
 eq "-k u+r -o -k u+x" "`kq -k u+r`" "`kq -k u+r -o -k u+x`"
 eq "-k X never a file" "" "`"$B" km -t f -k X`"
 for o in u=rwx o+s u+t g+t u+q u+ , x, 99 -8; do eq "-k reject [$o]" "rc=1" "`c km -k "$o" | tail -1`"; done
-eq "-k s/t class tag" ">>> ff : -k: s is for u or g, t is for o 'o+s' (6ab7ff46)" "`"$B" km -k o+s 2>&1`"
+eq "-k s/t class tag" ">>> ff : -k: s is for u or g, t is for o, not 'o+s' (6ab7ff46)" "`"$B" km -k o+s 2>&1`"
 
 # --- walk order: -S bytewise per directory, / sorts lowest; -D post-order ---
 exp=`find t/d 2>/dev/null | tr / '\001' | LC_ALL=C sort | tr '\001' /`
@@ -206,7 +209,7 @@ eq "--help sections" 14 "`$B --help | grep -c '^[A-Z][A-Z ]*$'`"
 
 # --- diagnostics: chkerr (>>>) and chkwrn (^^^) format, hex tag naming the message ---
 eq "err format" ">>> ff : cannot stat 't/nope': No such file or directory (6ab7ff32)" "`"$B" t/nope 2>&1 >/dev/null`"
-eq "usage format" ">>> ff : -t: types are f d l p s b c 'q' (6ab7ff0a)" "`"$B" t -t q 2>&1 >/dev/null`"
+eq "usage format" ">>> ff : -t: types are f d l p s b c, not 'q' (6ab7ff0a)" "`"$B" t -t q 2>&1 >/dev/null`"
 eq "wrn format" 1 "`"$B" -L t -n nothing 2>&1 >/dev/null | grep -Fcx "^^^ ff : filesystem loop, skipped 't/d/up' (6ab7ff3a)"`"
 eq "one line per usage error" 1 "`"$B" -y 2>&1 >/dev/null | wc -l | tr -d ' '`"
 
@@ -214,7 +217,7 @@ eq "one line per usage error" 1 "`"$B" -y 2>&1 >/dev/null | wc -l | tr -d ' '`"
 if [ -n "$have_bash" ]; then
   for o in "t" "t -t f" "t -t fl" "t -n *.c" "t -p */d/*" "t -e" "t -s 3" "t -s -1k" "t -m +365" \
       "t -m -1h -t f" "t -k +755" "t -k 755" "km -k -0755" "km -k x" "km -k -x" "km -k o-X" \
-      "km -k go-w" "km -not -k go-w" "km -k +s" "km -k +t" "km -k u+rwx,u-s" "km -k w" "km -k -7777" "km -k u+r -o -k u+x" \
+      "km -k go-w" "km -not -k go-w" "km -k +s" "km -k +t" "km -k u+rwx,u-s" "km -k w" "km -k -7777" "km -k u+r -o -k u+x" "km -k +rs" "km -k u+rs" \
       "t -n .h -z -o -t f -f" "t ( -n a -o -n em ) -t f" \
       "t -d -2" "t -d 1" "t -d +1 -d -3" "-D t" "-E t -r \.(c|C)$" "t -r d/e" "t -r ^t/d/e$" \
       "-I t -n *.C" "-I t -r \.c$" "t -n f.c -x echo {} ;" "t -n f.c -j echo {} ;" "-0 t -n n*" \
@@ -228,7 +231,7 @@ if [ -n "$have_bash" ]; then
   eq "bash -L loop status nonzero" 1 "`b -L t -t d | tail -1 | grep -vc '^rc=0$'`"
   # usage diagnostics are identical, message and tag
   for o in "-q t" "t -n" "t -t q" "t (" "t ( )" "t )" "t -o -f" "t !" "t -d x" "t -s 1q" "t -m 1y" \
-      "t -k 999" "t -k u=rwx" "t -k o+s" "t -k u+t" "t -l x" "t -i x" "t -w t/nope" "t -u nosuchuser_ff" "t -g nosuchgroup_ff" "t -y" "t -n a b" \
+      "t -k 999" "t -k u=rwx" "t -k o+s" "t -k u+t" "t -l x" "t -i x" "t -a 1y" "t -b x" "t -x {} ;" "t -w t/nope" "t -u nosuchuser_ff" "t -g nosuchgroup_ff" "t -y" "t -n a b" \
       "t -x echo {}" "t -x {} ;" "t -x ;" "t -x echo a{} ;" "t -j echo {} {} +" "t -x ./x ;" "-L t -delete"
   do
     set -f; eq "bash diagnostics [$o]" "`"$B" $o 2>&1 >/dev/null`" "`bash -c '. "$0"; ff "$@"' "$F" $o 2>&1 >/dev/null`"; set +f

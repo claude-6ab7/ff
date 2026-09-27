@@ -3,7 +3,7 @@
  * (c) 2026 George Georgalis <george@iuxta.com> Unlimited use with attribution.
  *
  * rev 6ab89f43 20260926 214451 PDT Sat 09:44 PM 26 Sep 2026
- *     -k permission query (octal at least/at most, symbolic has/lacks, X s t), -not
+ *     -k permission query (at least/at most, has/lacks, X s t), -not, "not" diagnostics
  * org 6ab7fec8 20260926 102008 PDT Sat 10:20 AM 26 Sep 2026
  *     owned openat walker, one-letter grammar, -x/-j/-delete, getent ids,
  *     tty escaping, status bitmask, chkerr/chkwrn diagnostics; companion
@@ -342,7 +342,7 @@ parse_perm(struct node *n, const char *a)
 					/* named classes must each own the bit */
 					if (who && !(who & 8) &&
 					    !(*p == 's' ? sbit[c] : tbit[c]))
-						bad("-k: s is for u or g, t is for o",
+						bad("-k: s is for u or g, t is for o, not",
 						    a, "6ab7ff46");
 					q->bits[c] |= *p == 's' ? sbit[c] : tbit[c];
 				} else {
@@ -376,7 +376,7 @@ getent_id(const char *db, const char *s, const char *what, const char *tag)
 	for (i = 0; i < sizeof bin / sizeof *bin && access(bin[i], X_OK); i++)
 		;
 	if (i == sizeof bin / sizeof *bin)
-		die(ST_ENV, "no getent to resolve names, use a numeric id", s, NULL, "6ab7ff22");
+		die(ST_ENV, "no getent, use a numeric id for", s, NULL, "6ab7ff22");
 	av[0] = (char *)"getent";
 	av[1] = (char *)db;
 	av[2] = (char *)"--";
@@ -495,6 +495,7 @@ primary(void)
 	    1073741824, 1073741824, 1099511627776ULL, 1099511627776ULL };
 	static const uintmax_t tm[] = { 1, 60, 3600, 86400, 604800 };
 	const char *t = tok[ti++], *a, *p;
+	char tw[40];		/* time rule naming its primary */
 	struct stat sb;
 	uintmax_t v;
 	int n, cmp, i, fl;
@@ -526,18 +527,18 @@ primary(void)
 			const char *q = strchr("fdlpsbc", *p);
 
 			if (q == NULL)
-				bad("-t: types are f d l p s b c", a, "6ab7ff0a");
+				bad("-t: types are f d l p s b c, not", a, "6ab7ff0a");
 			nd[n].tmask |= 1u << (q - "fdlpsbc");
 		}
 		if (*a == '\0')
-			bad("-t: types are f d l p s b c", a, "6ab7ff0a");
+			bad("-t: types are f d l p s b c, not", a, "6ab7ff0a");
 		return n;
 	case 'd': {
 		long lo, hi;
 
 		a = arg1();
 		if ((p = num(a, &cmp, &v)) == NULL || *p || v > LONG_MAX - 1)
-			bad("-d: depth is [+-]N", a, "6ab7ff0b");
+			bad("-d: depth is [+-]N, not", a, "6ab7ff0b");
 		lo = cmp == '+' ? (long)v + 1 : cmp == '-' ? 0 : (long)v;
 		hi = cmp == '-' ? (long)v - 1 : cmp == '+' ? LONG_MAX : (long)v;
 		if (lo > mindepth)
@@ -550,9 +551,9 @@ primary(void)
 		n = mk(N_SIZE, -1, -1);
 		a = arg1();
 		if ((p = num(a, &nd[n].cmp, &v)) == NULL)
-			bad("-s: size is [+-]N[ckMGT]", a, "6ab7ff0c");
+			bad("-s: size is [+-]N[ckMGT], not", a, "6ab7ff0c");
 		nd[n].num = mul(v, suffix(p, "ckKmMgGtT", szm, 1,
-		    "-s: size is [+-]N[ckMGT]", a, "6ab7ff0c"),
+		    "-s: size is [+-]N[ckMGT], not", a, "6ab7ff0c"),
 		    "-s: size overflows", a, "6ab7ff0d");
 		need_stat = 1;
 		return n;
@@ -560,10 +561,10 @@ primary(void)
 		n = mk(N_TIME, -1, -1);
 		nd[n].tsel = t[1];
 		a = arg1();
+		(void)snprintf(tw, sizeof tw, "-%c: time is [+-]N[smhdw], not", t[1]);
 		if ((p = num(a, &nd[n].cmp, &v)) == NULL)
-			bad("time is [+-]N[smhdw]", a, "6ab7ff0e");
-		nd[n].unit = suffix(p, "smhdw", tm, 86400,
-		    "time is [+-]N[smhdw]", a, "6ab7ff0e");
+			bad(tw, a, "6ab7ff0e");
+		nd[n].unit = suffix(p, "smhdw", tm, 86400, tw, a, "6ab7ff0e");
 		nd[n].num = v;
 		(void)mul(v, nd[n].unit, "time overflows", a, "6ab7ff0f");
 		if (v * nd[n].unit > (uintmax_t)INTMAX_MAX)
@@ -592,7 +593,7 @@ primary(void)
 		n = mk(t[1] == 'l' ? N_LINKS : N_INUM, -1, -1);
 		a = arg1();
 		if ((p = num(a, &nd[n].cmp, &nd[n].num)) == NULL || *p)
-			bad(t[1] == 'l' ? "-l: links is [+-]N" : "-i: inode is [+-]N", a,
+			bad(t[1] == 'l' ? "-l: links is [+-]N, not" : "-i: inode is [+-]N, not", a,
 			    t[1] == 'l' ? "6ab7ff16" : "6ab7ff17");
 		need_stat = 1;
 		return n;
@@ -620,15 +621,15 @@ primary(void)
 			bad("missing command after", t, "6ab7ff18");
 		for (i = 0; i < nd[n].argc; i++) {
 			if (strstr(nd[n].argv[i], "{}") && strcmp(nd[n].argv[i], "{}"))
-				bad("{} must be a whole argument", nd[n].argv[i], "6ab7ff19");
+				bad("{} must be a whole argument, not", nd[n].argv[i], "6ab7ff19");
 			if (nd[n].plus && i < nd[n].argc - 1 &&
 			    !strcmp(nd[n].argv[i], "{}"))
-				bad("with +, {} may appear only once, last", t, "6ab7ff1a");
+				bad("with +, {} may appear only once, last, in", t, "6ab7ff1a");
 			if (i == 0 && !strcmp(nd[n].argv[i], "{}"))
-				bad("{} cannot be the command", t, "6ab7ff1b");
+				bad("{} cannot be the command of", t, "6ab7ff1b");
 		}
 		if (t[1] == 'x' && strchr(nd[n].argv[0], '/') && nd[n].argv[0][0] != '/')
-			bad("-x: command must be absolute or found in PATH", nd[n].argv[0], "6ab7ff1c");
+			bad("-x: command must be absolute or found in PATH, not", nd[n].argv[0], "6ab7ff1c");
 		return n;
 	}
 	bad("unknown primary", t, "6ab7ff03");
@@ -641,7 +642,7 @@ parse_not(void)
 	int n;
 
 	if (ti >= ntok)
-		bad("expression ends early", ntok ? tok[ntok - 1] : NULL, "6ab7ff06");
+		bad("expression ends early, after", ntok ? tok[ntok - 1] : NULL, "6ab7ff06");
 	if (!strcmp(tok[ti], "!") || !strcmp(tok[ti], "-not")) {
 		ti++;
 		n = parse_not();
@@ -696,7 +697,7 @@ check_path(void)
 	for (;;) {
 		q = strchr(p, ':');
 		if (*p != '/')
-			die(ST_ENV, "-x: refusing relative or empty PATH element", getenv("PATH"), NULL, "6ab7ff29");
+			die(ST_ENV, "-x: refusing a relative or empty element in PATH", getenv("PATH"), NULL, "6ab7ff29");
 		if (q == NULL)
 			break;
 		p = q + 1;
@@ -1483,6 +1484,9 @@ static const char *const manual[] = {
 "              clause with X is false for anything else. s is setuid\n"
 "              with u, setgid with g, either with no class, both with\n"
 "              a; t is the sticky (/tmp) bit, alone or with o.\n"
+"              With no class, each class is tested with only the bits\n"
+"              it can hold, so -k +rs holds when other has r, since\n"
+"              other has no s; name the class to need both: -k u+rs.\n"
 "                -k u+x           owner may execute\n"
 "                -k x             someone may execute (same as +x)\n"
 "                -k -x            no one may execute\n"
@@ -1590,6 +1594,7 @@ static const char *const manual[] = {
 "  rev 6ab89f43 20260926 214451 PDT Sat 09:44 PM 26 Sep 2026\n"
 "      -k is a permission query: octal exact, +mode at least, -mode\n"
 "      at most; symbolic clauses + has, - lacks, with X s t. -not.\n"
+"      Diagnostics that state a rule end in \"not\" before the value.\n"
 "  org 6ab7fec8 20260926 102008 PDT Sat 10:20 AM 26 Sep 2026\n"
 "      owned openat walker with dev/ino verification; one-letter\n"
 "      grammar; -x execdir, -j exec, -delete through the verified parent;\n"
