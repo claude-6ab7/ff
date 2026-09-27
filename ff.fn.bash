@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
 ff () ( # functional find: ff grammar run by the host's native find; companion ff.c
+  # rev 6ab89f43 20260926 214451 PDT Sat 09:44 PM 26 Sep 2026
+  #     -k permission query (octal at least/at most, symbolic has/lacks, X s t), -not
   # org 6ab7fec8 20260926 102008 PDT Sat 10:20 AM 26 Sep 2026
   #     translator for BSD (-E) and GNU (-regextype) find dialects, tty escaping,
   #     chkerr/chkwrn diagnostics, subshell namespace; companion C binary ff.c
@@ -17,8 +19,52 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
     } # _ffbad
 
   _ff_tok () { # word that starts the expression
-    [[ "$1" =~ ^(!|\(|\)|-o|-delete|-[nprtdsmacbwkuglixjezfvq])$ ]]
+    [[ "$1" =~ ^(!|-not|\(|\)|-o|-delete|-[nprtdsmacbwkuglixjezfvq])$ ]]
     } # _ff_tok
+
+  _ff_perm () { # -k into native -perm terms, as ff.c parse_perm and p_perm
+    # octal: exact, +superset, -subset; symbolic: [ugoa]*[+-]?[rwxXst]+ clauses, + has, - lacks
+    local v="$1" w= p= sg= cl= c= b= i= X= all= first=
+    local -a cls=() cb=() t=() R=(0400 040 04) W=(0200 020 02) E=(0100 010 01) S=(04000 02000 0) T=(0 0 01000) L=(u g o)
+    _ff_none () { # none of the bits in $1: one ! -perm -BIT per bit, the same on every dialect
+      local k= ; for ((k=1; k<=04000; k<<=1)); do (($1 & k)) && t+=(! -perm "-$(printf %o "$k")") || : ; done ;}
+    [[ "$v" =~ ^([-+]?)([0-7]{1,4})$ ]] && {
+      b=$((8#${BASH_REMATCH[2]}))
+      case "${BASH_REMATCH[1]}" in
+        +) t=(-perm "-$(printf %o "$b")") ;;
+        -) _ff_none $((07777 & ~b)) ;;
+        *) t=(-perm "$(printf %o "$b")") ;;
+      esac
+      ((${#t[@]})) || t=('(' -type d -o ! -type d ')')   # -7777: every mode
+      ex+=('(' "${t[@]}" ')') ; return 0 ;}
+    [[ "$v" =~ ^[ugoa]*[-+]?[rwxXst]+(,[ugoa]*[-+]?[rwxXst]+)*$ ]] \
+      || { _ffbad "-k: bad mode" 6ab7ff11 "$v" ; return 1 ;}
+    IFS=, read -ra cls <<<"$v"
+    ex+=('(')
+    for cl in "${cls[@]}"; do
+      w="${cl%%[-+rwxXst]*}" ; p="${cl#"$w"}" ; sg=+
+      [[ "$p" =~ ^[-+] ]] && { sg="${p:0:1}" ; p="${p:1}" ;} || :
+      cb=(0 0 0) ; X= ; t=()
+      for ((i=0; i<${#p}; i++)); do for c in 0 1 2; do
+        [ -n "$w" ] && [[ "$w" != *a* ]] && [[ "$w" != *"${L[c]}"* ]] && continue || :
+        case "${p:i:1}" in r) b=${R[c]} ;; w) b=${W[c]} ;; x|X) b=${E[c]} ;; s) b=${S[c]} ;; t) b=${T[c]} ;; esac
+        [[ "${p:i:1}" == [st] ]] && ((b==0)) && [ -n "$w" ] && [[ "$w" != *a* ]] \
+          && { _ffbad "-k: s is for u or g, t is for o" 6ab7ff46 "$v" ; return 1 ;} || :
+        cb[c]=$((cb[c] | b)) ; [ "${p:i:1}" = X ] && X=1 || :
+      done ; done
+      all=$((cb[0] | cb[1] | cb[2]))
+      [ -n "$X" ] && t+=(-type d) || :
+      if [ "$sg" = - ]; then _ff_none $all
+      elif [ -n "$w" ]; then t+=(-perm "-$(printf %o "$all")")
+      else # no class: some participating class has all of its bits
+        t+=('(') ; first=1
+        for c in 0 1 2; do ((cb[c])) && { [ -z "$first" ] && t+=(-o) || : ; t+=(-perm "-$(printf %o "${cb[c]}")") ; first= ;} || : ; done
+        t+=(')')
+      fi
+      ex+=("${t[@]}")
+    done
+    ex+=(')')
+    } # _ff_perm
 
   _ff_rec () { # one record from the native find: -v line, NUL, escaped, or raw
     local LC_ALL=C a= b= c= t= s= fmt=
@@ -81,7 +127,7 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	           -g group  -l [+-]N  -i [+-]N  -e  -z (prune)
 	  actions  -f print  -v cksh line  -x cmd {} ;|+  (in entry's dir)
 	           -j cmd {} ;|+  (full path)  -delete  -q quit
-	  logic    ( )  !  juxtaposition = and  -o or
+	  logic    ( )  ! or -not  juxtaposition = and  -o or
 	  -h this summary, --help the manual
 	eof
     } # _ff_usage
@@ -142,8 +188,33 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	  -a -c -b    the same for access, status change and birth time;
 	              -b is false where the filesystem records no birth time
 	  -w file     modified more recently than file
-	  -k mode     permission bits: octal or symbolic (u+x,go-w); mode is
-	              exact, -mode all bits set, +mode any bit set
+	  -k mode     permission bits. Octal, all twelve bits:
+	                0755     exactly 0755
+	                +0755    at least 0755: every bit of it, maybe more
+	                -0755    at most 0755: no bit outside it, maybe fewer
+	              Symbolic, clauses [ugoa][+-][rwxXst] joined by commas,
+	              all of which must hold. + has, - lacks; a clause with
+	              no sign means +. u owner, g group, o other, a all
+	              three; each named class must satisfy the clause. With
+	              no class, + holds when some class has the bits and -
+	              when no class has any of them.
+	              X is x that only a directory satisfies (search); a
+	              clause with X is false for anything else. s is setuid
+	              with u, setgid with g, either with no class, both with
+	              a; t is the sticky (/tmp) bit, alone or with o.
+	                -k u+x           owner may execute
+	                -k x             someone may execute (same as +x)
+	                -k -x            no one may execute
+	                -k o-X           directories others may not search
+	                -k o-r           others may not read
+	                -k w             someone may write
+	                -k o+w           world writable
+	                -k go-w          neither group nor other may write
+	                -not -k go-w     group or other may write
+	                -k u+s  -k g+s   setuid; setgid
+	                -k +s            setuid or setgid
+	                -k +t            sticky
+	              Either of two bits in one class: -k u+r -o -k u+x
 	  -u user     owner, name or number;  -g group  group, name or number
 	  -l N        link count;  -i N  inode number
 	  -e          empty regular file or directory
@@ -162,9 +233,26 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	              .. and /; . is skipped silently
 	  -q          stop the walk; pending + batches still run
 
+
 	OPERATORS
-	  ( expr )  ! expr  expr expr (and)  expr -o expr
-	  ! binds tightest, then and, then -o. Quote ( ) ! and ; for the shell.
+	  expr expr       and: the right side is evaluated only when the
+	                  left is true
+	  expr -o expr    or: the right side is evaluated only when the left
+	                  is false, so its actions see only nodes the left
+	                  rejected
+	  ! expr          not; -not expr is the same
+	  ( expr )        grouping
+	  -not binds tightest, then and, then -o.
+	  The shell treats ( ) ; * and sometimes ! as its own syntax, so
+	  escape them with a backslash or quote them: \( \) \; '*.c'.
+	    ff . -n '*.c' -o -n '*.h' -t f          .c of any type, or .h files
+	    ff . \( -n '*.c' -o -n '*.h' \) -t f    .c and .h files only
+	    ff . -k u+r -o -k u+x                   owner may read or execute
+	  With no action in the expression, a node is printed when the whole
+	  expression is true. Once any action appears (-f -v -x -j -delete
+	  -q), only actions print. Pruning two directory names and printing
+	  only files therefore ends in -f:
+	    ff . \( -n .git -o -n node_modules \) -z -o -t f -f
 
 	EXEC
 	  Commands run by fork and exec, never through a shell. {} is replaced
@@ -195,7 +283,10 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	  From NetBSD find: one-letter switches; -r is unanchored; -s is bytes
 	  with no rounding; times compare seconds, not rounded days; -d is a
 	  global bound; {} is never replaced inside a larger word; names are
-	  escaped on a terminal; -I replaces -iname, -ipath and -iregex.
+	  escaped on a terminal; -I replaces -iname, -ipath and -iregex;
+	  -k symbolic modes are queries, not chmod arithmetic, and octal
+	  +mode (at least) and -mode (at most) read the opposite way to
+	  find -perm -mode.
 
 	EXAMPLES
 	  ff . -t f -n '*.c'              C sources
@@ -215,6 +306,9 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	  HFS+ a precomposed pattern does not match a decomposed name.
 
 	HISTORY
+	  rev 6ab89f43 20260926 214451 PDT Sat 09:44 PM 26 Sep 2026
+	      -k is a permission query: octal exact, +mode at least, -mode
+	      at most; symbolic clauses + has, - lacks, with X s t. -not.
 	  org 6ab7fec8 20260926 102008 PDT Sat 10:20 AM 26 Sep 2026
 	      owned openat walker with dev/ino verification; one-letter
 	      grammar; -x execdir, -j exec, -delete through the verified parent;
@@ -251,7 +345,7 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
       v="$1" ; shift ;} || :
     # grammar state: e expects a term, t follows one; mirrors ff.c parse_or/and/not
     case "$a" in
-      '!') gs=e ; ex+=('!') ;;
+      '!'|-not) gs=e ; ex+=('!') ;;
       '(') gs=e ; gd=$((gd+1)) ; ex+=('(') ;;
       ')') [ "$gs" = t ] && ((gd>0)) || {
              [ "$prev" = "(" ] && _ffbad "empty ( )" 6ab7ff07 || _ffbad "unexpected" 6ab7ff05 ")" ; return 1 ;}
@@ -296,10 +390,7 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
             *) ex+=('(' -${k}min "-$(((n+1)*u/60))") ; ((n)) && ex+=(! -${k}min "-$((n*u/60))") || : ; ex+=(')') ;; esac ;;
       -w) gs=t ; { [ -n "$H$L" ] && [ -e "$v" ] ;} || { [ -z "$H$L" ] && { [ -e "$v" ] || [ -L "$v" ] ;} ;} \
             || { _ffbad "-w: cannot stat" 6ab7ff10 "$v" ; return 1 ;} ; ex+=(-newer "$v") ;;
-      -k) gs=t ; [[ "$v" =~ ^[-+]?([0-7]{1,4}|([ugoa]*[-+=][rwxst]*)(,[ugoa]*[-+=][rwxst]*)*)$ ]] \
-            || { _ffbad "-k: bad mode" 6ab7ff11 "$v" ; return 1 ;}
-          [ "$dia" = gnu ] && [[ "$v" =~ ^\+ ]] && v="/${v#+}" || :
-          ex+=(-perm "$v") ;;
+      -k) gs=t ; _ff_perm "$v" || return 1 ;;
       -u|-g) gs=t ; [ "$a" = -u ] && k=-user || k=-group
           command find /dev/null -maxdepth 0 "$k" "$v" >/dev/null 2>&1 \
             || { _ffbad "${a}: no such ${k#-}" "$([ "$a" = -u ] && echo 6ab7ff12 || echo 6ab7ff13)" "$v" ; return 1 ;} ; ex+=("$k" "$v") ;;
