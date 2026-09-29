@@ -272,3 +272,14 @@ Where the build departs from or fills a gap in the plan above:
   already match find `-name`/`-path`), `[+-]N`/`[+-]HEX` shown for `-l`
   and `-i`, new prune example, grouped EXAMPLES each run on a scratch
   tree.
+- r7 (squashed into rev 6abb42b9 with r6; 6abb34a2 retired): first Darwin
+  `make test` showed 26 failures, none in the walker. test.sh now keeps
+  only absolute PATH elements (the user's disabled `x/Library/TeX/texbin`
+  entry is deliberate; `-x` still refuses it interactively, by design),
+  runs in UTC, chgrps the setgid fixture and skips it where still not
+  permitted, runs bash under `env -i`, filters loop entries BSD find
+  tests but GNU find and ff skip, and drives BSD `script`. Tests use
+  whole seconds only. `-w` files must begin with `./ ../ /` (tag
+  6ab7ff4b), so no word is both a file and a HEX time. ff.fn.bash writes
+  `-w` with reference files (`touch -d ...Z`, `-newer`) where the native
+  find lacks `-newermt @` (hook `FF_NO_NEWERMT` tests it on GNU).
