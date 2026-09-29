@@ -2,8 +2,9 @@
  * ff.c --- functional find: NetBSD find(1) semantics, one letter per switch
  * (c) 2026 George Georgalis <george@iuxta.com> Unlimited use with attribution.
  *
- * rev 6abb34a2 20260928 204642 PDT Mon 08:46 PM 28 Sep 2026
- *     -w when [+-](file|HEX), -same, -true -false, -i hex, -V, examples
+ * rev 6abb42b9 20260928 214649 PDT Mon 09:46 PM 28 Sep 2026
+ *     -w when [+-]([.]/file|HEX), -same, -true -false, -i hex, -V, examples;
+ *     Darwin test fixes; ff.fn.bash -w reference files without -newermt
  * rev 6ab89f43 20260926 214451 PDT Sat 09:44 PM 26 Sep 2026
  *     -k permission query (at least/at most, has/lacks, X s t), -not, "not" diagnostics
  * org 6ab7fec8 20260926 102008 PDT Sat 10:20 AM 26 Sep 2026
@@ -607,21 +608,22 @@ primary(void)
 		need_stat = 1;
 		return n;
 	case 'w':
-		/* when: [+-](file|HEX); all hex digits is epoch seconds, else a
-		 * file; a file named like hex or with a leading sign takes ./ */
+		/* when: [+-]([.]/file|HEX); a file begins with ./ ../ or /, so
+		 * no word is both a file and a hex time */
 		n = mk(N_NEWER, -1, -1);
 		a = arg1();
-		if (hexnum(a, &nd[n].cmp, &nd[n].num)) {
-			if (nd[n].num > (uintmax_t)INTMAX_MAX)
-				bad("time overflows", a, "6ab7ff0f");
-			nd[n].hexw = 1;
-		} else {
-			nd[n].cmp = *a == '+' || *a == '-' ? *a : 0;
-			p = a + (nd[n].cmp != 0);
+		nd[n].cmp = *a == '+' || *a == '-' ? *a : 0;
+		p = a + (nd[n].cmp != 0);
+		if (*p == '/' || !strncmp(p, "./", 2) || !strncmp(p, "../", 3)) {
 			if ((opt_H || opt_L ? stat(p, &sb) : lstat(p, &sb)) == -1)
 				bad("-w: cannot stat", p, "6ab7ff10");
 			nd[n].ref = MTIM(&sb);
-		}
+		} else if (hexnum(a, &nd[n].cmp, &nd[n].num)) {
+			if (nd[n].num > (uintmax_t)INTMAX_MAX)
+				bad("time overflows", a, "6ab7ff0f");
+			nd[n].hexw = 1;
+		} else
+			bad("-w: file is ./file or /file, time is HEX, not", a, "6ab7ff4b");
 		need_stat = 1;
 		return n;
 	case 'k':
@@ -1467,7 +1469,7 @@ static const char usage_text[] =
 "           -D post-order  -S sorted  -X one filesystem  -0 NUL output\n"
 "           -V show the native find command (ff.fn.bash)\n"
 "  tests    -n glob  -p glob  -r re  -t fdlpsbc  -d [+-]N  -s [+-]N[ckMGT]\n"
-"           -m -a -c -b [+-]N[smhdw]  -w [+-](file|HEX)  -k [+-]mode\n"
+"           -m -a -c -b [+-]N[smhdw]  -w [+-](./file|HEX)  -k [+-]mode\n"
 "           -u user  -g group  -l [+-]N  -i [+-]HEX  -same file  -e\n"
 "           -z (prune)  -true  -false\n"
 "  actions  -f print  -v cksh line  -x cmd {} ;|+  (in entry's dir)\n"
@@ -1538,12 +1540,12 @@ static const char *const manual[] = {
 "              to 8 days\n"
 "  -a -c -b    the same for access, status change and birth time;\n"
 "              -b is false where the filesystem records no birth time\n"
-"  -w [+-](file|HEX)\n"
+"  -w [+-]([.]/file|HEX)\n"
 "              when: modified after (+), before (-) or at the same time\n"
 "              as file's mtime, or as HEX epoch seconds (the -v mdate).\n"
-"              All hex digits is a time, anything else a file: write\n"
-"              ./cafe or ./-x for such names. A file compares the full\n"
-"              timestamp, HEX whole seconds. find -newer is -w +file.\n"
+"              A file begins with ./ ../ or /, so no word is both a file\n"
+"              and a time. A file compares the full timestamp, HEX\n"
+"              whole seconds. find -newer file is -w +./file.\n"
 "  -same file  the same node as file: same device and inode\n",
 "  -k mode     permission bits. Octal, all twelve bits:\n"
 "                0755     exactly 0755\n"
@@ -1649,7 +1651,7 @@ static const char *const manual[] = {
 "  with no rounding; times compare seconds, not rounded days; -d is a\n"
 "  global bound; {} is never replaced inside a larger word; names are\n"
 "  escaped on a terminal; -I replaces -iname, -ipath and -iregex;\n"
-"  -w is when, before, after or at (find -newer is -w +file); -i\n"
+"  -w is when, before, after or at (find -newer is -w +./file); -i\n"
 "  reads hex, as ff -v prints the inode;\n"
 "  -k symbolic modes are queries, not chmod arithmetic, and octal\n"
 "  +mode (at least) and -mode (at most) read the opposite way to\n"
@@ -1676,7 +1678,7 @@ static const char *const manual[] = {
 "    ff . -t f -m -30m                   modified in the last 30 minutes\n"
 "    ff . -t f -a +365                   not read for a year\n"
 "    ff . -t f -c -1 -o -b -1            changed or born within a day\n"
-"    ff . -w +Makefile -n '*.c'          sources newer than Makefile\n"
+"    ff . -w +./Makefile -n '*.c'        sources newer than Makefile\n"
 "    ff . -w -6abb2e78                   modified before that second\n"
 "    ff . -t f -k o+w                    world-writable files\n"
 "    ff / -X -t f -k +s                  setuid or setgid files\n"
@@ -1718,11 +1720,12 @@ static const char *const manual[] = {
 "  HFS+ a precomposed pattern does not match a decomposed name.\n"
 "\n",
 "HISTORY\n"
-"  rev 6abb34a2 20260928 204642 PDT Mon 08:46 PM 28 Sep 2026\n"
-"      -w is when: [+-](file|HEX), before, after or at a file's mtime\n"
-"      or a hex epoch second; bare -w file was newer, now +file.\n"
-"      -same, -true, -false; -i reads hex; -V shows the native find\n"
-"      command (ff.fn.bash); grouped examples of every feature.\n"
+"  rev 6abb42b9 20260928 214649 PDT Mon 09:46 PM 28 Sep 2026\n"
+"      -w is when: [+-]([.]/file|HEX), before, after or at a file's\n"
+"      mtime or a hex epoch second; a file takes ./ ../ or /; bare\n"
+"      -w file was newer, now -w +./file. -same, -true, -false; -i\n"
+"      reads hex; -V shows the native find command (ff.fn.bash), which\n"
+"      uses reference files where find lacks -newermt; grouped examples.\n"
 "  rev 6ab89f43 20260926 214451 PDT Sat 09:44 PM 26 Sep 2026\n"
 "      -k is a permission query: octal exact, +mode at least, -mode\n"
 "      at most; symbolic clauses + has, - lacks, with X s t. -not.\n"

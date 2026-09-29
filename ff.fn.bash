@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 
 ff () ( # functional find: ff grammar run by the host's native find; companion ff.c
-  # rev 6abb34a2 20260928 204642 PDT Mon 08:46 PM 28 Sep 2026
-  #     -w when [+-](file|HEX), -same, -true -false, -i hex, -V, examples
+  # rev 6abb42b9 20260928 214649 PDT Mon 09:46 PM 28 Sep 2026
+  #     -w when [+-]([.]/file|HEX), -same, -true -false, -i hex, -V, examples;
+  #     Darwin test fixes; ff.fn.bash -w reference files without -newermt
   # rev 6ab89f43 20260926 214451 PDT Sat 09:44 PM 26 Sep 2026
   #     -k permission query (at least/at most, has/lacks, X s t), -not, "not" diagnostics
   # org 6ab7fec8 20260926 102008 PDT Sat 10:20 AM 26 Sep 2026
@@ -35,32 +36,53 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
     ns=$((10#$ns)) ; ((ns)) && printf '%s.%09d' "$sec" $((ns-1)) || printf '%s.999999999' $((sec-1))
     } # _ff_pred
 
-  _ff_when () { # -w [+-](file|HEX) into native terms, as ff.c N_NEWER
-    local w="$1" sg= at= pr= h=
-    [[ "$w" =~ ^([+-]?)([0-9a-fA-F]{1,16})$ ]] && {
-      sg="${BASH_REMATCH[1]}" ; h="${BASH_REMATCH[2]}"
-      ((${#h}==16)) && [[ "$h" == [89a-fA-F]* ]] && { _ffbad "time overflows" 6ab7ff0f "$w" ; return 1 ;} || :
-      # whole seconds: +T after second T, -T before it, T within it
-      at="$((16#$h)).999999999" ; pr="$((16#$h - 1)).999999999" ;} || {
-      sg="${w:0:1}" ; [[ "$sg" == [+-] ]] && w="${w:1}" || sg=
+  _ff_ref () { # rf: a reference file at instant S.NNNNNNNNN, for finds without -newermt @
+    local sec="${1%.*}" ns="${1#*.}" iso=
+    [ -n "$wd" ] || { wd=$(mktemp -d "${TMPDIR:-/tmp}/ff.XXXXXX") || return 1
+      trap 'rm -f -- "$wd"/r[0-9]* ; rmdir -- "$wd"' EXIT ;}
+    # GNU date -d @S first: BSD date has no -d, so it cannot be misread there
+    read -r iso < <(date -u -d "@$sec" +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -r "$sec" +%Y-%m-%dT%H:%M:%S 2>/dev/null) || :
+    [[ "$iso" =~ ^-?[0-9]+-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$ ]] || return 1
+    nref=$((nref+1)) ; rf="$wd/r$nref"
+    touch -d "$iso.${ns}Z" -- "$rf" 2>/dev/null
+    } # _ff_ref
+
+  _ff_when () { # -w [+-]([.]/file|HEX) into native terms, as ff.c N_NEWER
+    local w="$1" sg= at= pr= up= lo=
+    sg="${w:0:1}" ; [[ "$sg" == [+-] ]] && w="${w:1}" || sg=
+    if [[ "$w" == /* || "$w" == ./* || "$w" == ../* ]]; then
       { [ -n "$H$L" ] && [ -e "$w" ] ;} || { [ -z "$H$L" ] && { [ -e "$w" ] || [ -L "$w" ] ;} ;} \
         || { _ffbad "-w: cannot stat" 6ab7ff10 "$w" ; return 1 ;}
       [ "$sg" = + ] && { ex+=(-newer "$w") ; return 0 ;} || :
       at=$(_ff_ns "$w") && [ -n "$at" ] || { chkerr "ff : -w needs a stat with nanoseconds, use ff.c '$w' (6ab7ff4a)" ; return 2 ;}
-      pr=$(_ff_pred "$at") ;}
-    command find /dev/null -maxdepth 0 -newermt @0 >/dev/null 2>&1 \
-      || { chkerr "ff : -w before or at a time needs -newermt, use ff.c (6ab7ff4a)" ; return 2 ;}
+      pr=$(_ff_pred "$at") ; up="$w"
+    elif [[ "$w" =~ ^[0-9a-fA-F]{1,16}$ ]]; then
+      ((${#w}==16)) && [[ "$w" == [89a-fA-F]* ]] && { _ffbad "time overflows" 6ab7ff0f "$1" ; return 1 ;} || :
+      # whole seconds: +T after second T, -T before it, T within it
+      at="$((16#$w)).999999999" ; pr="$((16#$w - 1)).999999999"
+    else
+      _ffbad "-w: file is ./file or /file, time is HEX, not" 6ab7ff4b "$1" ; return 1
+    fi
+    # -newermt @S.N where the native find takes it (GNU); else reference files and -newer
+    [ -z "$FF_NO_NEWERMT" ] && command find /dev/null -maxdepth 0 -newermt @0 >/dev/null 2>&1 && {
+      case "$sg" in
+        +) ex+=(-newermt "@$at") ;;
+        -) ex+=(! -newermt "@$pr") ;;
+        *) ex+=('(' -newermt "@$pr" ! -newermt "@$at" ')') ;;
+      esac ; return 0 ;}
     case "$sg" in
-      +) ex+=(-newermt "@$at") ;;
-      -) ex+=(! -newermt "@$pr") ;;
-      *) ex+=('(' -newermt "@$pr" ! -newermt "@$at" ')') ;;
-    esac
+      +) _ff_ref "$at" && ex+=(-newer "$rf") ;;
+      -) _ff_ref "$pr" && ex+=(! -newer "$rf") ;;
+      *) _ff_ref "$pr" && lo="$rf" && { [ -n "$up" ] || { _ff_ref "$at" && up="$rf" ;} ;} \
+           && ex+=('(' -newer "$lo" ! -newer "$up" ')') ;;
+    esac || { chkerr "ff : -w needs -newermt or touch -d and date, use ff.c (6ab7ff4a)" ; return 2 ;}
     } # _ff_when
 
   _ff_show () { # -V: the native command on stderr, quoted to paste back into a shell
     [ -n "$V" ] || return 0
     local q= w= ; for w in "$@"; do printf -v w '%q' "$w" ; q+="${q:+ }$w" ; done
     stderr "$q"
+    [ -z "$wd" ] || stderr "# reference files under $wd are removed after the run"
     } # _ff_show
 
   _ff_perm () { # -k into native -perm terms, as ff.c parse_perm and p_perm
@@ -165,7 +187,7 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	           -D post-order  -S sorted  -X one filesystem  -0 NUL output
 	           -V show the native find command (ff.fn.bash)
 	  tests    -n glob  -p glob  -r re  -t fdlpsbc  -d [+-]N  -s [+-]N[ckMGT]
-	           -m -a -c -b [+-]N[smhdw]  -w [+-](file|HEX)  -k [+-]mode
+	           -m -a -c -b [+-]N[smhdw]  -w [+-](./file|HEX)  -k [+-]mode
 	           -u user  -g group  -l [+-]N  -i [+-]HEX  -same file  -e
 	           -z (prune)  -true  -false
 	  actions  -f print  -v cksh line  -x cmd {} ;|+  (in entry's dir)
@@ -238,12 +260,12 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	              to 8 days
 	  -a -c -b    the same for access, status change and birth time;
 	              -b is false where the filesystem records no birth time
-	  -w [+-](file|HEX)
+	  -w [+-]([.]/file|HEX)
 	              when: modified after (+), before (-) or at the same time
 	              as file's mtime, or as HEX epoch seconds (the -v mdate).
-	              All hex digits is a time, anything else a file: write
-	              ./cafe or ./-x for such names. A file compares the full
-	              timestamp, HEX whole seconds. find -newer is -w +file.
+	              A file begins with ./ ../ or /, so no word is both a file
+	              and a time. A file compares the full timestamp, HEX
+	              whole seconds. find -newer file is -w +./file.
 	  -same file  the same node as file: same device and inode
 	  -k mode     permission bits. Octal, all twelve bits:
 	                0755     exactly 0755
@@ -349,7 +371,7 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	  with no rounding; times compare seconds, not rounded days; -d is a
 	  global bound; {} is never replaced inside a larger word; names are
 	  escaped on a terminal; -I replaces -iname, -ipath and -iregex;
-	  -w is when, before, after or at (find -newer is -w +file); -i
+	  -w is when, before, after or at (find -newer is -w +./file); -i
 	  reads hex, as ff -v prints the inode;
 	  -k symbolic modes are queries, not chmod arithmetic, and octal
 	  +mode (at least) and -mode (at most) read the opposite way to
@@ -376,7 +398,7 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	    ff . -t f -m -30m                   modified in the last 30 minutes
 	    ff . -t f -a +365                   not read for a year
 	    ff . -t f -c -1 -o -b -1            changed or born within a day
-	    ff . -w +Makefile -n '*.c'          sources newer than Makefile
+	    ff . -w +./Makefile -n '*.c'        sources newer than Makefile
 	    ff . -w -6abb2e78                   modified before that second
 	    ff . -t f -k o+w                    world-writable files
 	    ff / -X -t f -k +s                  setuid or setgid files
@@ -418,11 +440,12 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	  HFS+ a precomposed pattern does not match a decomposed name.
 
 	HISTORY
-	  rev 6abb34a2 20260928 204642 PDT Mon 08:46 PM 28 Sep 2026
-	      -w is when: [+-](file|HEX), before, after or at a file's mtime
-	      or a hex epoch second; bare -w file was newer, now +file.
-	      -same, -true, -false; -i reads hex; -V shows the native find
-	      command (ff.fn.bash); grouped examples of every feature.
+	  rev 6abb42b9 20260928 214649 PDT Mon 09:46 PM 28 Sep 2026
+	      -w is when: [+-]([.]/file|HEX), before, after or at a file's
+	      mtime or a hex epoch second; a file takes ./ ../ or /; bare
+	      -w file was newer, now -w +./file. -same, -true, -false; -i
+	      reads hex; -V shows the native find command (ff.fn.bash), which
+	      uses reference files where find lacks -newermt; grouped examples.
 	  rev 6ab89f43 20260926 214451 PDT Sat 09:44 PM 26 Sep 2026
 	      -k is a permission query: octal exact, +mode at least, -mode
 	      at most; symbolic clauses + has, - lacks, with X s t. -not.
@@ -439,7 +462,7 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	eof
     } # _ff_manual
   local a= b= c= i= n= v= u= s= k= dia= gs=e gd=0 prev= endopt= inexpr= act= ls= xd= rc=0
-  local E= I= H= L= D= S= X= Z= V= lo=0 hi= re= reader= f= t=
+  local E= I= H= L= D= S= X= Z= V= lo=0 hi= re= reader= f= t= wd= rf= nref=0
   local -a paths=() opt=() pre=() ex=()
   # BSD find takes -E before paths (NetBSD, Darwin, FreeBSD); GNU takes -regextype
   command find -E /dev/null -maxdepth 0 >/dev/null 2>&1 && dia=bsd || dia=gnu
