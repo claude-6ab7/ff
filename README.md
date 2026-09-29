@@ -66,6 +66,7 @@ primary's argument. Primaries are lowercase.
 | `-S` | `-s` | sorted walk |
 | `-X` | `-x` / `-xdev` | one filesystem |
 | `-0` | `-print0` | NUL-terminated names |
+| `-V` | | bash function: print the native find command to stderr |
 
 | primary | find | ff semantics |
 |---------|------|--------------|
@@ -76,12 +77,15 @@ primary's argument. Primaries are lowercase.
 | `-d [+-]N` | `-mindepth` `-maxdepth` | global walk bound |
 | `-s [+-]N[ckMGT]` | `-size` | bytes, exact, no rounding |
 | `-m -a -c -b [+-]N[smhdw]` | `-mtime` ... `-Btime` | age in seconds; default unit d |
-| `-w file` | `-newer` | |
+| `-w [+-](file\|HEX)` | `-newer` | when: after, before or at; see below |
+| `-same file` | `-samefile` | same device and inode |
 | `-k [+-]mode` | `-perm` | a query, see below |
 | `-u` `-g` | `-user` `-group` | |
-| `-l` `-i` | `-links` `-inum` | |
+| `-l [+-]N` | `-links` | |
+| `-i [+-]HEX` | `-inum` | hex, as `-v` prints it |
 | `-e` | `-empty` | |
 | `-z` | `-prune` | |
+| `-true` `-false` | `-true` `-false` | |
 | `-f` | `-print` | |
 | `-v` | `-ls` | cksh line, identical to `cksh -n0 -x0` |
 | `-x cmd ... ;` / `{} +` | `-execdir` | runs in the node's verified directory |
@@ -92,6 +96,14 @@ primary's argument. Primaries are lowercase.
 Operators: `( )`, `!` or `-not`, juxtaposition for and, `-o`. The shell
 treats `( ) ; *` and sometimes `!` as its own syntax, so escape or quote
 them: `ff . \( -n .git -o -n node_modules \) -z -o -t f -f`.
+
+`-w` is "when": `-w +ref` modified after file `ref` (find `-newer`),
+`-w -ref` before it, `-w ref` at the same time, comparing the full
+timestamp. With a hex epoch second, the mdate column of `ff -v`, the
+comparison is by whole seconds: `-w -6abb2e78` modified before that
+second. A word of hex digits is a time and anything else a file, so a file
+named `cafe`, `+x` or `-x` is written `./cafe`, `./+x`, `./-x`. Bare `-w
+file` meant "newer" before rev 6abb34a2; that is now `-w +file`.
 
 `-k` asks about permission bits rather than doing chmod arithmetic, and
 its `+` and `-` keep ff's sense of more and less:
@@ -136,7 +148,7 @@ functions, one line each, ending in a hex tag that names the message:
 
 ```
 >>> ff : cannot stat 't/nope': No such file or directory (6ab7ff32)
->>> ff : -t: types are f d l p s b c 'q' (6ab7ff0a)
+>>> ff : -t: types are f d l p s b c, not 'q' (6ab7ff0a)
 ^^^ ff : filesystem loop, skipped 't/d/up' (6ab7ff3a)
 ```
 
@@ -214,11 +226,26 @@ Each of these exits 2 and names the binary:
   no sorted walk. Plain `-S` output is emulated there by sorting each
   operand's paths with `/` as the lowest byte.
 
-A path operand beginning with `-` also exits 2.
+A path operand beginning with `-` also exits 2, as do `-w` forms other
+than `+file` where the native find lacks `-newermt` or `stat` cannot give
+nanoseconds.
+
+Where the native find has no `-samefile` (NetBSD), `-same` uses the
+reference's inode number from `stat` as `-inum`. find has no primary for
+the device, so that is exact unless the walk crosses into another
+filesystem holding the same inode number; `-V` shows which form ran.
+
+`-V` prints the native command before running it, quoted to paste back
+into a shell, as a starting point for an OS-specific find command:
+
+```
+$ ff -V . -n '*.h' -w +Makefile
+find . \( -name \*.h -newer Makefile \) -print
+```
 
 ## Verified
 
-- `make test` passes, 274 cases, under GNU make on Linux (glibc 2.39): gcc
+- `make test` passes, 313 cases, under GNU make on Linux (glibc 2.39): gcc
   and clang, a gcc build with ASan and UBSan, and as root and non-root.
   Root skips the unreadable-directory case. gcc and clang compile ff.c
   clean under `-Werror`, including a syntax check of the Darwin branch.
