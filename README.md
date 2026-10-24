@@ -351,8 +351,8 @@ find . \( -name \*.h -newer ./Makefile \) -print
   path operand beginning with `-`; walk diagnostics in chkerr form (the
   native find writes its own).
 - It passes under GNU make on Linux (glibc 2.39, GNU find 4.9, bash 5.2):
-  613 cases non-root, 609 as root, which skips the unreadable-directory
-  cases; with gcc and clang, and a gcc build with ASan and UBSan; again
+  at rev 6adcb748, 699 cases non-root, 695 as root, which skips the
+  unreadable-directory cases; with gcc and clang, and a gcc build with ASan and UBSan; again
   with `TMPDIR` behind a symlink, as Darwin's `/tmp` is. gcc and clang
   compile ff.c clean under `-Werror -Wpedantic`.
 - The walk matches GNU find 4.9 on each primary it shares.
@@ -367,8 +367,14 @@ find . \( -name \*.h -newer ./Makefile \) -print
   in the binary pass (224 cases, `/dev/full` absent) and the parity pass,
   including the `./` wrapper on real BSD `-execdir`. Its bash pass failed
   3 cases, each a BSD find difference listed under Bash translator
-  limits; they are now probed and skipped there, and the Darwin re-run of
-  that change is pending.
+  limits; they are now probed and skipped there.
+- Darwin, rev 6adcb748: `make test` passes with no failures in all three
+  passes, binary, bash function and parity. The skips are `/dev/full`
+  being absent, the binary-only groups, the three probed BSD find
+  differences, and the `-L` loop status that BSD find does not report.
+  The first run failed only the two `-k` full-tie cases, where BWK awk
+  rejected an unparenthesized `print` expression in test.sh; parenthesized,
+  they pass.
 - Not yet run under bmake or on NetBSD. The makefile avoids every
   construct bmake rejects, but it is unverified there.
 
