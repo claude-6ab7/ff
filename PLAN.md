@@ -358,3 +358,23 @@ Where the build departs from or fills a gap in the plan above:
   `..` difference above no longer reaches the native find and its probe
   is retired. Tests carry `-d 0` on every root case, so a broken refusal
   could only attempt rmdir on `/`.
+- r9 (rev 6adcb748): pull-up to the read-only upstream georgalis/pub src/ff
+  8db7a1c, copied exactly, then this change on top. The permission query
+  moves from `-k` to `-mode`, semantics unchanged (tags 6ab7ff11 and
+  6ab7ff46 kept, messages renamed), so `-k` is free for sorting:
+  `-k[r][N]`, global like the options, N 1-6 attached, bare `-k` is 6,
+  `r` reverses. N names the cksh field as `-v` lays it out; every
+  record (`-f`, `-v`, default print) is keyed by its node's stat, so
+  `-k5` orders plain names by mtime and `-v` is not needed. Compare by
+  value (mdate signed, names bytewise), ties to the following fields,
+  then walk order, so the order is total and the same in both
+  implementations. Records are held until the walk ends; `-x`/`-j`
+  output streams unsorted. Decided on review: `-k3` (the hash, always
+  `.`) is a pass-through with no buffering, rather than an error or a
+  no-op sort. `-k0`, `-k7`, `-kx` are usage errors, tag 6ab7ff4c. A
+  separate `-k 5` is not read as N: an optional detached argument would
+  make the next word's meaning depend on its spelling.
+  ff.fn.bash holds TAB-joined decimal keys per record (field 3 carries
+  the `-v` indicator) and sorts with `sort -z -s -t TAB`, each key
+  carrying its own `n` and `r`, since a key with modifiers inherits no
+  global `-r`; a sort without `-z -s` exits 2, tag 6ab7ff4d.
