@@ -231,8 +231,8 @@ eq "-k -Z" "kt/a kt/b kt/c kt/h kt/m kt/z " "`X -Z -k kt -t f | tr '\000' ' '`"
 eq "-k -q" 1 "`X -k kt -t f -f -q | wc -l | tr -d ' '`"
 eq "-k word as an argument" "rc=0" "`r kt -n -k5`"
 bo "-v with -f on one node (the translator refuses -v with other actions)" && {
-  eq "-k full tie, walk order" "v kt/a" "`X -k kt -n a -v -f | awk '{print NF == 1 ? $1 : "v"}' | tr '\n' ' ' | sed 's/ $//'`"
-  eq "-kr full tie, walk order" "v kt/a" "`X -kr kt -n a -v -f | awk '{print NF == 1 ? $1 : "v"}' | tr '\n' ' ' | sed 's/ $//'`"
+  eq "-k full tie, walk order" "v kt/a" "`X -k kt -n a -v -f | awk '{print (NF == 1 ? $1 : "v")}' | tr '\n' ' ' | sed 's/ $//'`"
+  eq "-kr full tie, walk order" "v kt/a" "`X -kr kt -n a -v -f | awk '{print (NF == 1 ? $1 : "v")}' | tr '\n' ' ' | sed 's/ $//'`"
 }
 for o in -k0 -k7 -kx -krr -k12 -kr0 -k5r; do eq "-k reject [$o]" "rc=1" "`r $o kt | tail -1`"; done
 eq "-k reject tag" ">>> ff : -k: sort key is [r][1-6], not '-k7' (6ab7ff4c)" "`X kt -k7 2>&1`"
