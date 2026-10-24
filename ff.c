@@ -2,8 +2,16 @@
  * ff.c --- functional find: NetBSD find(1) semantics, one letter per switch
  * (c) 2026 George Georgalis <george@iuxta.com> Unlimited use with attribution.
  *
+ * rev 6adcb748 20261024 064856 PDT Sat 06:48 AM 24 Oct 2026
+ *     -mode is the permission query (was -k); -k[r][N] sorts printed records
+ *     by cksh field N, keyed by node stat, held until the walk ends; -k3
+ *     passes walk order through, unbuffered
+ * rev 6abc5da8 20260929 175400 PDT Tue 05:54 PM 29 Sep 2026
+ *     -0 true and -1 false replace -true -false; -Z NUL output (was -0);
+ *     -y replaces -same; -w [+-][ ]: the sign may stand apart;
+ *     -delete refuses an operand ending in .. or the root directory whole
  * rev 6abb42b9 20260928 214649 PDT Mon 09:46 PM 28 Sep 2026
- *     -w when [+-]([.]/file|HEX), -same, -true -false, -i hex, -V, examples;
+ *     -w when [+-]([.][.]/file|HEX), -same, -true -false, -i hex, -V, examples;
  *     Darwin test fixes; ff.fn.bash -w reference files without -newermt
  * rev 6ab89f43 20260926 214451 PDT Sat 09:44 PM 26 Sep 2026
  *     -k permission query (at least/at most, has/lacks, X s t), -not, "not" diagnostics
@@ -83,12 +91,14 @@ static const char *prog = "ff";
 static int status;
 
 /* options */
-static int opt_E, opt_I, opt_H, opt_L, opt_D, opt_S, opt_X, opt_0, opt_V;
+static int opt_E, opt_I, opt_H, opt_L, opt_D, opt_S, opt_X, opt_Z, opt_V;
 static long mindepth = 0, maxdepth = LONG_MAX;
 
 static time_t now;
 static int esc_out, esc_err;	/* escape names: stdout/stderr is a tty */
 static int quitting, need_stat;
+static int deleting;		/* -delete in the expression: refuse_operand */
+static int sortk, sortr;	/* -k[r][N]: cksh field N, 0 unsorted; reversed */
 
 /* ---------------------------------------------------------------- output */
 
@@ -120,22 +130,54 @@ u8len(const unsigned char *p, const unsigned char *e)
 	return n;
 }
 
+static void *xrealloc(void *, size_t);
+
+/* -k: records held until the walk ends, each keyed by its node's stat */
+struct rec {
+	uintmax_t ino, nlink, size;
+	intmax_t mtime;
+	size_t name, text, len;	/* offsets into ob: raw path, record bytes */
+	size_t seq;		/* walk order, the last tie break */
+};
+static char *ob;
+static size_t oblen, obcap;
+static struct rec *rv;
+static size_t nrv, caprv;
+
+/* bytes to f, or to the record buffer when f is NULL */
+static void
+put(FILE *f, const void *p, size_t n)
+{
+	if (f != NULL) {
+		(void)fwrite(p, 1, n, f);
+		return;
+	}
+	while (oblen + n > obcap) {
+		obcap = obcap ? obcap * 2 : 65536;
+		ob = xrealloc(ob, obcap);
+	}
+	memcpy(ob + oblen, p, n);
+	oblen += n;
+}
+
 /* a name, raw or with unsafe bytes as \ooo */
 static void
 putname(FILE *f, const char *s, int esc)
 {
 	const unsigned char *p = (const unsigned char *)s, *e;
+	char o[5];
 	size_t n;
 
 	if (!esc) {
-		(void)fputs(s, f);
+		put(f, s, strlen(s));
 		return;
 	}
 	for (e = p + strlen(s); p < e; p += n)
 		if ((n = u8len(p, e)) != 0)
-			(void)fwrite(p, 1, n, f);
+			put(f, p, n);
 		else {
-			(void)fprintf(f, "\\%03o", *p);
+			(void)snprintf(o, sizeof o, "\\%03o", *p);
+			put(f, o, 4);
 			n = 1;
 		}
 }
@@ -217,7 +259,7 @@ struct batch {			/* pending {} + arguments */
 	unsigned long gen;	/* -x: that level's generation */
 };
 
-struct kq {			/* one -k symbolic clause */
+struct kq {			/* one -mode symbolic clause */
 	int sign;		/* '+' has, '-' lacks */
 	int any;		/* no class named: + holds for some class */
 	int dir;		/* X: only a directory satisfies */
@@ -230,14 +272,14 @@ struct node {
 	uintmax_t num, unit;	/* compared value; time unit in seconds */
 	int tsel;		/* time: 'm' 'a' 'c' 'b' */
 	unsigned tmask;		/* type letters */
-	mode_t mode;		/* -k octal */
-	struct kq *kq;		/* -k symbolic clauses, all must hold */
+	mode_t mode;		/* -mode octal */
+	struct kq *kq;		/* -mode symbolic clauses, all must hold */
 	int nkq;
 	const char *pat;
 	regex_t re;
 	struct timespec ref;	/* -w file: reference mtime */
 	int hexw;		/* -w HEX: num is epoch seconds, not ref */
-	dev_t dev;		/* -same: reference device, inode in num */
+	dev_t dev;		/* -y: reference device, inode in num */
 	char **argv;		/* exec template, argc words */
 	int argc, plus;
 	struct batch b;
@@ -322,7 +364,7 @@ mul(uintmax_t a, uintmax_t b, const char *what, const char *arg, const char *tag
 }
 
 /*
- * -k: octal is exact, +mode a superset (every bit, maybe more), -mode a
+ * -mode: octal is exact, +N a superset (every bit, maybe more), -N a
  * subset (no bit outside, maybe fewer). Symbolic is a query, not chmod:
  * clauses [ugoa]*[+-]?[rwxXst]+ joined by commas; + has, - lacks, no sign
  * means +. Named classes must each satisfy a clause; with none, + holds
@@ -344,7 +386,7 @@ parse_perm(struct node *n, const char *a)
 		for (d = p; *p >= '0' && *p <= '7' && p - d < 4; p++)
 			n->mode = (mode_t)(n->mode << 3 | (mode_t)(*p - '0'));
 		if (*p != '\0')
-			bad("-k: bad mode", a, "6ab7ff11");
+			bad("-mode: bad mode", a, "6ab7ff11");
 		return;
 	}
 	for (;;) {
@@ -356,7 +398,7 @@ parse_perm(struct node *n, const char *a)
 		q->any = who == 0;
 		q->sign = *p == '+' || *p == '-' ? *p++ : '+';
 		if (!strchr("rwxXst", *p) || *p == '\0')
-			bad("-k: bad mode", a, "6ab7ff11");
+			bad("-mode: bad mode", a, "6ab7ff11");
 		for (; *p && strchr("rwxXst", *p); p++)
 			for (c = 0; c < 3; c++) {
 				if (!(who & 8) && who && !(who & 1u << c))
@@ -365,7 +407,7 @@ parse_perm(struct node *n, const char *a)
 					/* named classes must each own the bit */
 					if (who && !(who & 8) &&
 					    !(*p == 's' ? sbit[c] : tbit[c]))
-						bad("-k: s is for u or g, t is for o, not",
+						bad("-mode: s is for u or g, t is for o, not",
 						    a, "6ab7ff46");
 					q->bits[c] |= *p == 's' ? sbit[c] : tbit[c];
 				} else {
@@ -376,7 +418,7 @@ parse_perm(struct node *n, const char *a)
 		if (*p == '\0')
 			break;
 		if (*p++ != ',' || *p == '\0')
-			bad("-k: bad mode", a, "6ab7ff11");
+			bad("-mode: bad mode", a, "6ab7ff11");
 	}
 }
 
@@ -491,16 +533,21 @@ is_prim(const char *s, const char *list)
 	return strstr(list, k) != NULL;
 }
 
-#define P_ARG  "nprtdsmacbwkugli"	/* primaries taking one argument */
-#define P_NONE "ezfvq"			/* primaries taking none */
+#define P_ARG  "nprtdsmacbwugliy"	/* primaries taking one argument */
+#define P_NONE "ezfvq01"		/* primaries taking none; -0 true, -1 false */
 #define P_EXEC "xj"			/* primaries taking cmd ... ; or + */
+
+static int
+takes_arg(const char *s)
+{
+	return is_prim(s, P_ARG) || !strcmp(s, "-mode");
+}
 
 static int
 is_exprtok(const char *s)
 {
 	return !strcmp(s, "!") || !strcmp(s, "-not") || !strcmp(s, "(") || !strcmp(s, ")") ||
-	    !strcmp(s, "-true") || !strcmp(s, "-false") || !strcmp(s, "-same") ||
-	    !strcmp(s, "-o") || !strcmp(s, "-delete") || is_prim(s, P_ARG) ||
+	    !strcmp(s, "-o") || !strcmp(s, "-delete") || takes_arg(s) ||
 	    is_prim(s, P_NONE) || is_prim(s, P_EXEC);
 }
 
@@ -528,19 +575,24 @@ primary(void)
 		opt_D = 1;
 		return mk(N_DELETE, -1, -1);
 	}
-	if (!strcmp(t, "-true") || !strcmp(t, "-false"))
-		return mk(t[1] == 't' ? N_TRUE : N_FALSE, -1, -1);
-	if (!strcmp(t, "-same")) {
-		n = mk(N_SAME, -1, -1);
-		a = arg1();
-		if ((opt_H || opt_L ? stat(a, &sb) : lstat(a, &sb)) == -1)
-			bad("-same: cannot stat", a, "6ab7ff48");
-		nd[n].dev = sb.st_dev;
-		nd[n].num = (uintmax_t)sb.st_ino;
+	if (!strcmp(t, "-mode")) {
+		n = mk(N_PERM, -1, -1);
+		parse_perm(&nd[n], arg1());
 		need_stat = 1;
 		return n;
 	}
 	switch (t[1]) {
+	case '0': case '1':	/* true, false */
+		return mk(t[1] == '0' ? N_TRUE : N_FALSE, -1, -1);
+	case 'y':		/* the same node: device and inode */
+		n = mk(N_SAME, -1, -1);
+		a = arg1();
+		if ((opt_H || opt_L ? stat(a, &sb) : lstat(a, &sb)) == -1)
+			bad("-y: cannot stat", a, "6ab7ff48");
+		nd[n].dev = sb.st_dev;
+		nd[n].num = (uintmax_t)sb.st_ino;
+		need_stat = 1;
+		return n;
 	case 'n': case 'p':
 		n = mk(t[1] == 'n' ? N_NAME : N_PATH, -1, -1);
 		nd[n].pat = arg1();
@@ -608,27 +660,28 @@ primary(void)
 		need_stat = 1;
 		return n;
 	case 'w':
-		/* when: [+-]([.]/file|HEX); a file begins with ./ ../ or /, so
-		 * no word is both a file and a hex time */
+		/* when: [+-][ ]([.][.]/file|HEX); a file begins with ./ ../ or /,
+		 * so no word is both a file and a hex time. A lone sign word
+		 * takes the next word, kept whole by the pre-pass; diagnostics
+		 * then name that word. */
 		n = mk(N_NEWER, -1, -1);
 		a = arg1();
 		nd[n].cmp = *a == '+' || *a == '-' ? *a : 0;
 		p = a + (nd[n].cmp != 0);
+		if (nd[n].cmp && *p == '\0')
+			a = p = arg1();
+		if (*p == '+' || *p == '-')	/* one sign only */
+			bad("-w: file is [.][.]/file, time is HEX, not", a, "6ab7ff4b");
 		if (*p == '/' || !strncmp(p, "./", 2) || !strncmp(p, "../", 3)) {
 			if ((opt_H || opt_L ? stat(p, &sb) : lstat(p, &sb)) == -1)
 				bad("-w: cannot stat", p, "6ab7ff10");
 			nd[n].ref = MTIM(&sb);
-		} else if (hexnum(a, &nd[n].cmp, &nd[n].num)) {
+		} else if (hexnum(p, &cmp, &nd[n].num)) {
 			if (nd[n].num > (uintmax_t)INTMAX_MAX)
 				bad("time overflows", a, "6ab7ff0f");
 			nd[n].hexw = 1;
 		} else
-			bad("-w: file is ./file or /file, time is HEX, not", a, "6ab7ff4b");
-		need_stat = 1;
-		return n;
-	case 'k':
-		n = mk(N_PERM, -1, -1);
-		parse_perm(&nd[n], arg1());
+			bad("-w: file is [.][.]/file, time is HEX, not", a, "6ab7ff4b");
 		need_stat = 1;
 		return n;
 	case 'u': case 'g':
@@ -1185,13 +1238,10 @@ p_delete(struct ent *e)
 	const char *b = e->base;
 
 	if (e->depth == 0) {
+		/* find skips . silently; .. and / never get here, their
+		 * operands were refused whole (refuse_operand) */
 		if (!strcmp(b, "."))
-			return 1;	/* find skips . silently */
-		if (!strcmp(b, "..") || !strcmp(b, "/")) {
-			ERR("refusing to delete", e->path, NULL, "6ab7ff37");
-			status |= ST_NODE;
-			return 0;
-		}
+			return 1;
 		if (lstat(e->path, &sb) == -1 ||
 		    unlinkat(AT_FDCWD, e->path, S_ISDIR(sb.st_mode) ? AT_REMOVEDIR : 0)) {
 			ERR("cannot delete", e->path, strerror(errno), "6ab7ff38");
@@ -1210,17 +1260,97 @@ p_delete(struct ent *e)
 	return 1;
 }
 
+/* where a record goes: stdout, or under -k a new held record */
+static FILE *
+rec_open(struct ent *e)
+{
+	struct rec *r;
+
+	if (!sortk)
+		return stdout;
+	if (nrv == caprv) {
+		caprv = caprv ? caprv * 2 : 1024;
+		rv = xrealloc(rv, caprv * sizeof *rv);
+	}
+	r = &rv[nrv];
+	r->ino = (uintmax_t)e->st.st_ino;
+	r->nlink = (uintmax_t)e->st.st_nlink;
+	r->size = (uintmax_t)e->st.st_size;
+	r->mtime = (intmax_t)e->st.st_mtime;
+	r->name = oblen;
+	put(NULL, e->path, strlen(e->path) + 1);
+	r->text = oblen;
+	r->seq = nrv;
+	return NULL;
+}
+
+static void
+rec_close(void)
+{
+	if (sortk) {
+		rv[nrv].len = oblen - rv[nrv].text;
+		nrv++;
+	}
+}
+
+static void
+p_print(struct ent *e)
+{
+	FILE *f = rec_open(e);
+
+	putname(f, e->path, esc_out && !opt_Z);
+	put(f, opt_Z ? "" : "\n", 1);
+	rec_close();
+}
+
 static void
 p_ls(struct ent *e)
 {
+	FILE *f = rec_open(e);
 	int t = etype(e);
+	char b[96];
 
-	(void)printf("%8jx %2jx . %8jx %08jx ", (uintmax_t)e->st.st_ino,
-	    (uintmax_t)e->st.st_nlink, (uintmax_t)e->st.st_size,
-	    (uintmax_t)e->st.st_mtime);
-	putname(stdout, e->path, esc_out);
-	(void)fputs(t == 'd' ? "/\n" : t == 'l' ? "@\n" : t == 'p' ? "|\n" :
-	    t == 's' ? "=\n" : "\n", stdout);
+	(void)snprintf(b, sizeof b, "%8jx %2jx . %8jx %08jx ",
+	    (uintmax_t)e->st.st_ino, (uintmax_t)e->st.st_nlink,
+	    (uintmax_t)e->st.st_size, (uintmax_t)e->st.st_mtime);
+	put(f, b, strlen(b));
+	putname(f, e->path, esc_out);
+	(void)strcpy(b, t == 'd' ? "/\n" : t == 'l' ? "@\n" : t == 'p' ? "|\n" :
+	    t == 's' ? "=\n" : "\n");
+	put(f, b, strlen(b));
+	rec_close();
+}
+
+/* -k order: field sortk, ties to the following fields through the name
+ * (the hash, field 3, is always .), then walk order; r reverses the fields */
+static int
+cmp_rec(const void *a, const void *b)
+{
+	const struct rec *x = a, *y = b;
+	int f, c = 0;
+
+	for (f = sortk; f <= 6 && c == 0; f++)
+		switch (f) {
+		case 1: c = (x->ino > y->ino) - (x->ino < y->ino); break;
+		case 2: c = (x->nlink > y->nlink) - (x->nlink < y->nlink); break;
+		case 4: c = (x->size > y->size) - (x->size < y->size); break;
+		case 5: c = (x->mtime > y->mtime) - (x->mtime < y->mtime); break;
+		case 6: c = strcmp(ob + x->name, ob + y->name); break;
+		}
+	if (sortr)
+		c = -c;
+	return c ? c : (x->seq > y->seq) - (x->seq < y->seq);
+}
+
+static void
+rec_flush(void)
+{
+	size_t i;
+
+	if (nrv > 1)
+		qsort(rv, nrv, sizeof *rv, cmp_rec);
+	for (i = 0; i < nrv; i++)
+		put(stdout, ob + rv[i].text, rv[i].len);
 }
 
 static int
@@ -1262,10 +1392,7 @@ eval(int i, struct ent *e)
 	case N_LINKS: return cmpnum(n->cmp, (uintmax_t)e->st.st_nlink, n->num);
 	case N_INUM: return cmpnum(n->cmp, (uintmax_t)e->st.st_ino, n->num);
 	case N_PRUNE: e->prune = 1; return 1;
-	case N_PRINT:
-		putname(stdout, e->path, esc_out && !opt_0);
-		(void)putchar(opt_0 ? '\0' : '\n');
-		return 1;
+	case N_PRINT: p_print(e); return 1;
 	case N_LS: p_ls(e); return 1;
 	case N_EXEC: case N_EXECDIR: return do_exec(n, e);
 	case N_DELETE: return p_delete(e);
@@ -1432,6 +1559,23 @@ visit(struct ent *e)
 		(void)eval(root, e);
 }
 
+/*
+ * -delete refuses an operand whole, before any walk below it: one whose last
+ * component is .., or the root directory by identity (/ // /. /usr/.., or .
+ * run from /; with -H a symlink to /). Refusing only the node, as find does,
+ * would still empty it in post-order.
+ */
+static int
+refuse_operand(const char *path, const char *base)
+{
+	struct stat sb, rs;
+
+	if (!strcmp(base, ".."))
+		return 1;
+	return (opt_H ? stat(path, &sb) : lstat(path, &sb)) == 0 &&
+	    stat("/", &rs) == 0 && sb.st_dev == rs.st_dev && sb.st_ino == rs.st_ino;
+}
+
 static void
 walk_operand(const char *path)
 {
@@ -1446,6 +1590,12 @@ walk_operand(const char *path)
 	s = strrchr(base, '/');
 	memset(&e, 0, sizeof e);
 	e.base = s && s[1] ? s + 1 : base;
+	if (deleting && refuse_operand(path, e.base)) {
+		ERR("refusing to delete", path, NULL, "6ab7ff37");
+		status |= ST_NODE;
+		free(base);
+		return;
+	}
 	n = strlen(path);
 	if (n + 2 > pbcap) {
 		pbcap = n + 256;
@@ -1464,14 +1614,15 @@ walk_operand(const char *path)
 /* ------------------------------------------------------------------ help */
 
 static const char usage_text[] =
-"Usage: ff [-EIHLDSX0V] [--] [path ...] [expression]\n"
+"Usage: ff [-EIHLDSXZV] [-k[r][N]] [--] [path ...] [expression]\n"
 "  options  -E ERE for -r  -I ignore case  -H/-L follow symlinks\n"
-"           -D post-order  -S sorted  -X one filesystem  -0 NUL output\n"
+"           -D post-order  -S sorted  -X one filesystem  -Z NUL output\n"
 "           -V show the native find command (ff.fn.bash)\n"
+"           -k[r][N] sort by cksh field N, default 6 name, r reverse\n"
 "  tests    -n glob  -p glob  -r re  -t fdlpsbc  -d [+-]N  -s [+-]N[ckMGT]\n"
-"           -m -a -c -b [+-]N[smhdw]  -w [+-](./file|HEX)  -k [+-]mode\n"
-"           -u user  -g group  -l [+-]N  -i [+-]HEX  -same file  -e\n"
-"           -z (prune)  -true  -false\n"
+"           -m -a -c -b [+-]N[smhdw]  -w [+-][ ]([.][.]/file|HEX)\n"
+"           -u user  -g group  -l [+-]N  -i [+-]HEX  -y file (same node)  -e\n"
+"           -mode [+-]bits  -z (prune)  -0 (true)  -1 (false)\n"
 "  actions  -f print  -v cksh line  -x cmd {} ;|+  (in entry's dir)\n"
 "           -j cmd {} ;|+  (full path)  -delete  -q quit\n"
 "  logic    ( )  ! or -not  juxtaposition = and  -o or\n"
@@ -1483,18 +1634,19 @@ static const char *const manual[] = {
 "  ff - functional find: walk file trees, one letter per switch\n"
 "\n"
 "SYNOPSIS\n"
-"  ff [-EIHLDSX0V] [--] [path ...] [expression]\n"
+"  ff [-EIHLDSXZV] [-k[r][N]] [--] [path ...] [expression]\n"
 "  ff -h | --help\n"
 "\n"
 "DESCRIPTION\n"
 "  ff walks each path (default .) and evaluates the expression for every\n"
 "  node, as find(1) does, with one letter per switch. Options are\n"
-"  uppercase and global; they may appear anywhere except as the argument\n"
-"  of a primary. Primaries are lowercase. With no action in the\n"
-"  expression, each node for which it is true is printed.\n"
+"  uppercase, and -k, and global; they may appear anywhere except as\n"
+"  the argument of a primary. Primaries are lowercase, the digits 0 and\n"
+"  1, or -mode and -delete. With no action in the expression, each node\n"
+"  for which it is true is printed.\n"
 "\n"
 "  Printed paths are the operand, then / and each name below it. Output\n"
-"  is raw bytes when stdout is not a terminal or -0 is given. On a\n"
+"  is raw bytes when stdout is not a terminal or -Z is given. On a\n"
 "  terminal, C0 and C1 control characters, DEL and bytes that are not\n"
 "  valid UTF-8 print as \\ooo octal escapes, so a crafted name cannot\n"
 "  drive the terminal; names in diagnostics follow the same rule.\n"
@@ -1511,17 +1663,26 @@ static const char *const manual[] = {
 "  -D     post-order: a directory is tested after its contents\n"
 "  -S     sorted walk: each directory's names in bytewise order\n"
 "  -X     do not descend into directories on other filesystems\n"
-"  -0     end names from -f and the default print with NUL, not newline\n"
+"  -Z     end names from -f and the default print with NUL, not newline\n"
+"  -k[r][N]\n"
+"         sort what ff prints by cksh field N, as -v lays it out:\n"
+"         1 inode, 2 links, 3 hash, 4 size, 5 mdate, 6 name; -k is\n"
+"         -k6, r reverses. Each record, from -f, -v or the default\n"
+"         print, is keyed by its node, so -k5 orders names by mtime\n"
+"         without -v. Numbers compare by value, names bytewise; ties go\n"
+"         to the following fields, then walk order. Records are held\n"
+"         until the walk ends; -x and -j output is not sorted. The hash\n"
+"         is always ., so -k3 keeps walk order and holds nothing.\n"
 "  --     end of options: following words are paths, even with a\n"
 "         leading -, until a primary or operator\n"
 "  -V     ff.fn.bash only: print the native find command to stderr\n"
 "         before running it; helpful to extend a command to an OS find\n"
 "         specific implementation. The binary notes this and runs.\n"
 "  -h     short usage;  --help  this manual\n"
-"\n",
+"\n"
 "PRIMARIES\n"
-"  N is decimal: +N more than N, -N less than N, N exactly. HEX is\n"
-"  hexadecimal without 0x, as ff -v prints it.\n"
+"  N           decimal: +N more than N, -N less than N, N exactly.\n"
+"  HEX         hexadecimal without 0x, as ff -v prints it.\n"
 "  -n glob     last component of the examined pathname matches glob\n"
 "  -p glob     examined pathname matches glob\n"
 "              The special shell pattern characters [ ] * and ? may be\n"
@@ -1540,14 +1701,15 @@ static const char *const manual[] = {
 "              to 8 days\n"
 "  -a -c -b    the same for access, status change and birth time;\n"
 "              -b is false where the filesystem records no birth time\n"
-"  -w [+-]([.]/file|HEX)\n"
+"  -w [+-][ ]([.][.]/file|HEX)\n",
 "              when: modified after (+), before (-) or at the same time\n"
 "              as file's mtime, or as HEX epoch seconds (the -v mdate).\n"
 "              A file begins with ./ ../ or /, so no word is both a file\n"
 "              and a time. A file compares the full timestamp, HEX\n"
-"              whole seconds. find -newer file is -w +./file.\n"
-"  -same file  the same node as file: same device and inode\n",
-"  -k mode     permission bits. Octal, all twelve bits:\n"
+"              whole seconds. The sign may stand apart as its own word:\n"
+"              -w + ./file is -w +./file. find -newer file is -w +./file.\n"
+"  -y file     the same node as file: same device and inode\n"
+"  -mode bits  permission bits. Octal, all twelve bits:\n"
 "                0755     exactly 0755\n"
 "                +0755    at least 0755: every bit of it, maybe more\n"
 "                -0755    at most 0755: no bit outside it, maybe fewer\n"
@@ -1562,27 +1724,29 @@ static const char *const manual[] = {
 "              with u, setgid with g, either with no class, both with\n"
 "              a; t is the sticky (/tmp) bit, alone or with o.\n"
 "              With no class, each class is tested with only the bits\n"
-"              it can hold, so -k +rs holds when other has r, since\n"
-"              other has no s; name the class to need both: -k u+rs.\n"
-"                -k u+x           owner may execute\n"
-"                -k x             someone may execute (same as +x)\n"
-"                -k -x            no one may execute\n"
-"                -k o-X           directories others may not search\n"
-"                -k o-r           others may not read\n"
-"                -k w             someone may write\n"
-"                -k o+w           world writable\n"
-"                -k go-w          neither group nor other may write\n"
-"                -not -k go-w     group or other may write\n"
-"                -k u+s  -k g+s   setuid; setgid\n"
-"                -k +s            setuid or setgid\n"
-"                -k +t            sticky\n"
-"              Either of two bits in one class: -k u+r -o -k u+x\n"
+"              it can hold, so -mode +rs holds when other has r,\n"
+"              since other has no s; name the class to need both:\n"
+"              -mode u+rs.\n"
+"                -mode u+x        owner may execute\n"
+"                -mode x          someone may execute (same as +x)\n"
+"                -mode -x         no one may execute\n"
+"                -mode o-X        directories others may not search\n"
+"                -mode o-r        others may not read\n"
+"                -mode w          someone may write\n"
+"                -mode o+w        world writable\n"
+"                -mode go-w       neither group nor other may write\n"
+"                -not -mode go-w  group or other may write\n"
+"                -mode u+s        setuid\n"
+"                -mode g+s        setgid\n"
+"                -mode +s         setuid or setgid\n"
+"                -mode +t         sticky\n"
+"              Either of two bits in one class: -mode u+r -o -mode u+x\n"
 "  -u user     owner, name or number;  -g group  group, name or number\n"
 "  -l [+-]N    link count\n"
 "  -i [+-]HEX  inode number, hex as ff -v prints it\n"
 "  -e          empty regular file or directory\n"
 "  -z          prune: do not descend into this directory; true\n"
-"  -true       always true;  -false  always false\n"
+"  -0          always true;  -1  always false\n"
 "\n"
 "ACTIONS\n"
 "  -f          print the path; explicit form for use with -o\n"
@@ -1593,34 +1757,36 @@ static const char *const manual[] = {
 "  -x cmd ... {} +    the same, many names per run, per directory\n"
 "  -j cmd ... ;       run cmd from the current directory, {} as the path\n"
 "  -j cmd ... {} +    the same, many paths per run\n"
-"  -delete     remove the node; implies -D; refused with -L and for\n"
-"              .. and /; . is skipped silently\n"
+"  -delete     remove the node; implies -D; refused with -L. An operand\n"
+"              ending in .., or that is the root directory (/, /., or .\n"
+"              run from /), is refused whole and not walked (4); an\n"
+"              operand . is walked and kept itself, as find does\n"
 "  -q          stop the walk; pending + batches still run\n"
 "\n"
-"\n",
+"\n"
 "OPERATORS\n"
 "  expr expr       and: the right side is evaluated only when the\n"
 "                  left is true\n"
 "  expr -o expr    or: the right side is evaluated only when the left\n"
 "                  is false, so its actions see only nodes the left\n"
 "                  rejected\n"
-"  ! expr          not; -not expr is the same\n"
+"  ! expr          not; -not expr is the same\n",
 "  ( expr )        grouping\n"
 "  -not binds tightest, then and, then -o.\n"
 "  The shell treats ( ) ; * and sometimes ! as its own syntax, so\n"
 "  escape them with a backslash or quote them: \\( \\) \\; '*.c'.\n"
 "    ff . -n '*.c' -o -n '*.h' -t f          .c of any type, or .h files\n"
 "    ff . \\( -n '*.c' -o -n '*.h' \\) -t f    .c and .h files only\n"
-"    ff . -k u+r -o -k u+x                   owner may read or execute\n"
+"    ff . -mode u+r -o -mode u+x             owner may read or execute\n"
 "  With no action in the expression, a node is printed when the whole\n"
 "  expression is true. Once any action appears (-f -v -x -j -delete\n"
 "  -q), only actions print. Prune directories by name and print the\n"
 "  files that are not RCS (,v) or backup (~) files:\n"
 "    ff . \\( -n .git -o -n tmp \\) -z -t f -o -t f -not -E -r ',v$|~$'\n"
 "  -z is true, so the -t f after it makes that side false for the\n"
-"  pruned directories; -z -false does the same. Options such as -E\n"
+"  pruned directories; -z -1 does the same. Options such as -E\n"
 "  may appear anywhere, even after -not.\n"
-"\n",
+"\n"
 "EXEC\n"
 "  Commands run by fork and exec, never through a shell. {} is replaced\n"
 "  only when it is a whole argument. With +, {} must be last and appear\n"
@@ -1652,10 +1818,11 @@ static const char *const manual[] = {
 "  global bound; {} is never replaced inside a larger word; names are\n"
 "  escaped on a terminal; -I replaces -iname, -ipath and -iregex;\n"
 "  -w is when, before, after or at (find -newer is -w +./file); -i\n"
-"  reads hex, as ff -v prints the inode;\n"
-"  -k symbolic modes are queries, not chmod arithmetic, and octal\n"
-"  +mode (at least) and -mode (at most) read the opposite way to\n"
-"  find -perm -mode.\n"
+"  reads hex, as ff -v prints the inode; -0 -1 -y are find -true\n"
+"  -false -samefile, and -Z is -print0;\n"
+"  -mode is not find -perm: symbolic modes are queries, not chmod\n"
+"  arithmetic, and octal +N (at least) and -N (at most) read the\n"
+"  opposite way to find -perm -N; -k sorts what find leaves to sort(1).\n"
 "\n"
 "EXAMPLES\n"
 "  Options\n"
@@ -1666,13 +1833,15 @@ static const char *const manual[] = {
 "    ff -I . -n '*.jpg'                  .jpg .JPG .Jpg\n"
 "    ff -E . -r '/(src|lib)/[^/]*\\.c$'   C files directly in src or lib\n"
 "    ff -D src                           each directory after its contents\n"
-"    ff -0 . -t f -s +1M | xargs -0 ls -l   large files, any names\n"
+"    ff -Z . -t f -s +1M | xargs -0 ls -l   large files, any names\n"
+"    ff -k5 . -t f -m -1                 changed within a day, oldest first\n"
+"    ff -kr4 . -t f -v                   cksh lines, largest first\n"
 "    ff -V . -n '*.h'                    ff.fn.bash: show the find command\n"
 "  Primaries\n"
 "    ff . -n '[A-Z]*.[ch]'               capitalized C sources and headers\n"
 "    ff . -p '*/test/*' -t f             files below any test directory\n"
 "    ff . -r '\\.orig$' -o -r '\\.rej$'    patch leftovers\n"
-"    ff . -t lp                          symlinks and fifos\n"
+"    ff . -t lp                          symlinks and fifos\n",
 "    ff . -d 1 -t d                      subdirectories, one level\n"
 "    ff . -t f -s +100M                  files over 100 MiB\n"
 "    ff . -t f -m -30m                   modified in the last 30 minutes\n"
@@ -1680,15 +1849,16 @@ static const char *const manual[] = {
 "    ff . -t f -c -1 -o -b -1            changed or born within a day\n"
 "    ff . -w +./Makefile -n '*.c'        sources newer than Makefile\n"
 "    ff . -w -6abb2e78                   modified before that second\n"
-"    ff . -t f -k o+w                    world-writable files\n"
-"    ff / -X -t f -k +s                  setuid or setgid files\n"
+"    ff . -w - ./Makefile -n '*.c'       sources older, the sign apart\n"
+"    ff . -t f -mode o+w                 world-writable files\n"
+"    ff / -X -t f -mode +s               setuid or setgid files\n"
 "    ff . -u root -o -g 0                owned by root or by group 0\n"
 "    ff . -t f -l +1 -v                  hard-linked files, with inodes\n"
 "    ff . -i 1cc01d                      the node -v showed as 1cc01d\n"
-"    ff . -same notes.txt                notes.txt and its hard links\n"
-"    ff . -e                             empty files and directories\n",
+"    ff . -y notes.txt                   notes.txt and its hard links\n"
+"    ff . -e                             empty files and directories\n"
 "  Actions\n"
-"    ff . -t f -v | sort -k5             cksh lines, oldest first\n"
+"    ff -k5 . -t f -v                    cksh lines, oldest first\n"
 "    ff . -n core -t f -f -q             the first core file, then stop\n"
 "    ff . -n '*.o' -delete               remove objects\n"
 "    ff build -d +0 -t d -e -delete      remove empty directories below\n"
@@ -1705,11 +1875,11 @@ static const char *const manual[] = {
 "  Operators\n"
 "    ff . \\( -n '*.c' -o -n '*.h' \\) -not -p '*/vendor/*'\n"
 "                                        C files outside vendor trees\n"
-"    ff . \\( -n .git -o -n tmp \\) -z -false -o -t f\n"
+"    ff . \\( -n .git -o -n tmp \\) -z -1 -o -t f\n"
 "                                        files, pruning two directory names\n"
-"    ff . -t f \\( -j grep -q TODO {} \\; -j echo todo: {} \\; -o -true \\) -f\n"
+"    ff . -t f \\( -j grep -q TODO {} \\; -j echo todo: {} \\; -o -0 \\) -f\n"
 "                                        every file, TODO files marked first\n"
-"    ff . -t f -not -k u+w -f -o -t d -e -f\n"
+"    ff . -t f -not -mode u+w -f -o -t d -e -f\n"
 "                                        read-only files and empty directories\n"
 "NOTES\n"
 "  -u and -g resolve names on Linux by running getent from /usr/bin or\n"
@@ -1718,13 +1888,23 @@ static const char *const manual[] = {
 "  platforms use the C library.\n"
 "  Names are compared as bytes: no Unicode normalization, so on Darwin\n"
 "  HFS+ a precomposed pattern does not match a decomposed name.\n"
-"\n",
+"\n"
 "HISTORY\n"
+"  rev 6adcb748 20261024 064856 PDT Sat 06:48 AM 24 Oct 2026\n"
+"      -mode is the permission query, was -k; -k[r][N] sorts output by\n"
+"      cksh field N (1 inode 2 links 4 size 5 mdate 6 name, default 6),\n"
+"      keyed by node stat, no -v needed; -k3 passes walk order through.\n"
+"  rev 6abc5da8 20260929 175400 PDT Tue 05:54 PM 29 Sep 2026\n"
+"      -0 true and -1 false replace -true and -false; -Z is NUL output\n"
+"      (was -0); -y replaces -same; -w [+-][ ]: the sign may stand\n"
+"      apart; -delete is a long switch to confirm. ff.fn.bash gives -x\n"
+"      ./name where BSD find -execdir passes a bare name. -delete\n"
+"      refuses an operand ending in .., or the root directory, whole.\n"
 "  rev 6abb42b9 20260928 214649 PDT Mon 09:46 PM 28 Sep 2026\n"
-"      -w is when: [+-]([.]/file|HEX), before, after or at a file's\n"
+"      -w is when: [+-]([.][.]/file|HEX), before, after or at a file's\n"
 "      mtime or a hex epoch second; a file takes ./ ../ or /; bare\n"
 "      -w file was newer, now -w +./file. -same, -true, -false; -i\n"
-"      reads hex; -V shows the native find command (ff.fn.bash), which\n"
+"      reads hex; -V shows the native find command (ff.fn.bash), which\n",
 "      uses reference files where find lacks -newermt; grouped examples.\n"
 "  rev 6ab89f43 20260926 214451 PDT Sat 09:44 PM 26 Sep 2026\n"
 "      -k is a permission query: octal exact, +mode at least, -mode\n"
@@ -1760,7 +1940,7 @@ put_help(int full)
 static int
 is_optword(const char *s)
 {
-	return s[0] == '-' && s[1] != '\0' && strspn(s + 1, "EIHLDSX0V") == strlen(s + 1);
+	return s[0] == '-' && s[1] != '\0' && strspn(s + 1, "EIHLDSXZV") == strlen(s + 1);
 }
 
 static int
@@ -1795,6 +1975,17 @@ main(int argc, char **argv)
 	 * primary arguments and exec words kept whole */
 	for (i = 1; i < argc; i++) {
 		a = argv[i];
+		if (!endopt && a[0] == '-' && a[1] == 'k') {
+			/* -k[r][N]: the last one wins; the hash (3) is always ., so
+			 * -k3 keeps walk order and holds nothing */
+			p = a + 2 + (a[2] == 'r');
+			if (*p && (*p < '1' || *p > '6' || p[1]))
+				bad("-k: sort key is [r][1-6], not", a, "6ab7ff4c");
+			sortk = *p ? *p - '0' : 6;
+			sortk = sortk == 3 ? 0 : sortk;
+			sortr = a[2] == 'r';
+			continue;
+		}
 		if (!endopt && is_optword(a)) {
 			for (p = a + 1; *p; p++)
 				switch (*p) {
@@ -1805,7 +1996,7 @@ main(int argc, char **argv)
 				case 'D': opt_D = 1; break;
 				case 'S': opt_S = 1; break;
 				case 'X': opt_X = 1; break;
-				case '0': opt_0 = 1; break;
+				case 'Z': opt_Z = 1; break;
 				case 'V': opt_V = 1; break;
 				}
 			continue;
@@ -1826,10 +2017,16 @@ main(int argc, char **argv)
 		}
 		inexpr = 1;
 		tok[ntok++] = argv[i];
-		if (is_prim(a, P_ARG) || !strcmp(a, "-same")) {
+		if (takes_arg(a)) {
 			if (++i >= argc)
 				bad("missing argument for", a, "6ab7ff02");
 			tok[ntok++] = argv[i];
+			/* -w + file: a lone sign keeps the next word as well */
+			if (a[1] == 'w' && (!strcmp(argv[i], "+") || !strcmp(argv[i], "-"))) {
+				if (++i >= argc)
+					bad("missing argument for", a, "6ab7ff02");
+				tok[ntok++] = argv[i];
+			}
 		} else if (is_prim(a, P_EXEC)) {
 			for (i++; i < argc; i++) {
 				tok[ntok++] = argv[i];
@@ -1848,12 +2045,17 @@ main(int argc, char **argv)
 		if (ti < ntok)
 			bad("unexpected", tok[ti], "6ab7ff05");
 	}
+	if (sortk)
+		need_stat = 1;	/* every record is keyed by its stat */
 	if (!has_action(root))
 		root = root < 0 ? mk(N_PRINT, -1, -1) :
 		    mk(N_AND, root, mk(N_PRINT, -1, -1));
 	for (i = 0; i < nnd; i++)
-		if (nd[i].type == N_DELETE && opt_L)
-			bad("-delete is refused with -L", NULL, "6ab7ff1e");
+		if (nd[i].type == N_DELETE) {
+			if (opt_L)
+				bad("-delete is refused with -L", NULL, "6ab7ff1e");
+			deleting = 1;
+		}
 	for (i = 0; i < nnd; i++)
 		if (nd[i].type == N_EXECDIR && !strchr(nd[i].argv[0], '/'))
 			useenv = 2;
@@ -1896,6 +2098,7 @@ main(int argc, char **argv)
 		walk_operand(paths[i]);
 	}
 	flush_all(0, 0);
+	rec_flush();
 	xflush();
 	return status;
 }

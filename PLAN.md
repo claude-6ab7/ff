@@ -64,8 +64,10 @@ per-open race proof. nftw has no subtree prune in POSIX. Owned walker:
 ## Grammar (draft letters --- expect revision)
 
 Positional like find: `ff [options] [path...] [expression]`; default path `.`,
-default action print. Options are uppercase, primaries lowercase, so the two
-sets never collide.
+default action print. Options are uppercase letters, primaries lowercase
+letters or the digits 0 and 1 (r8), so the two sets never collide. The
+tables below carry the current letters; the decisions log records each
+change.
 
 Options (before paths)
 
@@ -77,7 +79,7 @@ Options (before paths)
 | -D | -d | depth-first (post-order) |
 | -S | -s | sorted traversal |
 | -X | -x / -xdev | stay on one filesystem |
-| -0 | -print0 | NUL-terminated output |
+| -Z | -print0 | NUL-terminated output (r8; was -0) |
 | -h / --help | | usage / manual |
 
 Primaries (after paths); `!` not, `-o` or, juxtaposition and, `(` `)` group
@@ -91,7 +93,9 @@ Primaries (after paths); `!` not, `-o` or, juxtaposition and, `(` `)` group
 | -d [+-]N | -depth n / min/maxdepth | walker bound: `-d -3` prunes below depth 3 |
 | -s [+-]N[ckMG] | -size | bytes default; decided r1 |
 | -m -a -c -b [+-]N[smhdw] | -mtime/-atime/-ctime/-Btime | units as Darwin/FreeBSD; days default |
-| -w file | -newer | mtime newer than file |
+| -w [+-][ ]([.][.]/file\|HEX) | -newer | when: after, before or at (r6); the sign may stand apart (r8) |
+| -y file | -samefile | same device and inode (r8; was -same, r6) |
+| -0 / -1 | -true / -false | true, false (r8; were -true -false, r6) |
 | -k mode | -perm | octal or symbolic, `-`/`+` prefixes as find |
 | -u -g name/id | -user -group | |
 | -e | -empty | |
@@ -100,7 +104,7 @@ Primaries (after paths); `!` not, `-o` or, juxtaposition and, `(` `)` group
 | -z | -prune | |
 | -x cmd {} ; / + | -execdir | argv exec in the entry's directory, never a shell |
 | -j cmd {} ; / + | -exec | plain exec from ff's cwd, full path in `{}`; race-exposed, documented as such (r2) |
-| -delete | -delete | the one long primary, by design; see below |
+| -delete | -delete | a long switch to confirm; see below |
 | -q | -exit/-quit | stop walk |
 | -v | -ls | cksh-shape line: hex fields, awk-sortable |
 
@@ -108,9 +112,12 @@ Primaries (after paths); `!` not, `-o` or, juxtaposition and, `(` `)` group
 one-keystroke typo cannot destroy data.
 Implies `-D` post-order, as find does. Removal is `unlinkat(dirfd, name,
 0 | AT_REMOVEDIR)` against the already-verified parent dirfd --- the same
-race closure as `-x`: no path is re-resolved. Refuses operands `.`, `..`, `/`
-and any path ending in `/..`; non-empty dir failure = bit 4, walk continues.
-The bash translator maps it to native `-delete` (both dialects have it).
+race closure as `-x`: no path is re-resolved. An operand ending in `..`, or
+the root directory by device and inode, is refused whole, not walked, bit 4
+(r8; before, only the node was refused and its contents were still
+deleted); `.` is walked and kept, as find does; non-empty dir failure = bit
+4, walk continues. The bash translator maps it to native `-delete` (both
+dialects have it) after refusing the same operands itself.
 
 Excluded phase 1: `-ok`, `-fprint`, `-printf` (GNU only anyway), `-flags`,
 `-fstype`.
@@ -121,7 +128,7 @@ Excluded phase 1: `-ok`, `-fprint`, `-printf` (GNU only anyway), `-flags`,
   only; `+` batches sized against `sysconf(_SC_ARG_MAX)` minus environ;
   execdir semantics (`./name` in the opened dirfd via `fchdir` in the child)
   closes the path-swap race that plain `-exec` has.
-- output (decided r1): raw bytes (as find) under `-0` or when stdout is not a
+- output (decided r1): raw bytes (as find) under `-Z` or when stdout is not a
   tty; on a tty escape control characters (C0, DEL, and C1 as bytes
   0x80-0x9f only when not part of valid UTF-8) as `\ooo` to block terminal
   injection. Test: fixture name with ESC, compare tty (via `script`) vs pipe.
@@ -188,7 +195,7 @@ Excluded phase 1: `-ok`, `-fprint`, `-printf` (GNU only anyway), `-flags`,
 ## Phases
 
 1. `--help` manual text first --- the grammar's source of truth.
-2. Walker + `-n -p -r -t -d -z`, `-E -I -H -L -D -S -X -0`, print.
+2. Walker + `-n -p -r -t -d -z`, `-E -I -H -L -D -S -X -Z`, print.
 3. `-s -m -a -c -b -w -k -u -g -e -l -i`.
 4. `-x` and `-j` (`;` and `+`), `-delete`, `-q`, `-v`.
 5. bash translator + parity section.
@@ -283,3 +290,90 @@ Where the build departs from or fills a gap in the plan above:
   6ab7ff4b), so no word is both a file and a HEX time. ff.fn.bash writes
   `-w` with reference files (`touch -d ...Z`, `-newer`) where the native
   find lacks `-newermt @` (hook `FF_NO_NEWERMT` tests it on GNU).
+- r8 (rev 6abc5da8): `-0` and `-1` replace `-true` and `-false`, read
+  as true and false; NUL output moves from `-0` to `-Z`, so every
+  option is an uppercase letter and primaries are lowercase letters or
+  the two digits. `-Z` was chosen over a positional `-0` (NUL before the
+  expression, true inside it): options are accepted anywhere, so a
+  position-dependent `-0` would change meaning silently when moved,
+  while the old `ff -0 . ...` now fails loudly (`-0` starts the
+  expression, and the path is an unexpected word). `-y` replaces
+  `-same`, so `-delete` is the one long primary left, now described
+  as "a long switch to confirm". `-w [+-][ ]([.][.]/file|HEX)`: a lone
+  `+` or `-` word takes the next word, kept whole by the pre-pass; that
+  word may carry no sign of its own, and diagnostics name it. The first
+  Darwin run of rev 6abb42b9 (4 of 325 failed) is answered: test.sh
+  works in `pwd -P`, since Darwin's `/tmp` is `/private/tmp` and `-x pwd`
+  prints the physical path; BSD `-execdir` passes a bare name where GNU
+  and ff.c pass `./name`, so ff.fn.bash probes this once per call and,
+  for bare names, runs `-x` through a fixed `/bin/sh -c` script that
+  prefixes `./` to `{}` names (a mask argument marks them) and to every
+  `+` name, the command words passed as arguments and never evaluated,
+  ending in `exec`. `FF_BARE_EXECDIR` forces the wrapper for tests on
+  GNU; ff.fn.bash `-h`/`--help` heredocs are generated from the binary.
+  Review follow-up in the same rev: the file form is written
+  `[.][.]/file`, which names exactly the three accepted prefixes `/`
+  `./` `../` (the earlier `[.]./file` missed `/file`), in every header,
+  usage, manual and history line; diagnostic 6ab7ff4b states the same
+  form. Usage shows `-0 (true)  -1 (false)`.
+  Second follow-up in the same rev: `make test` runs every behavior case
+  through both implementations (`cases` with `RUN` set to the binary,
+  then to a clean-bash wrapper for the function), then the byte-for-byte
+  parity pass, each with its own tally; `bo "reason"` marks the groups
+  only the binary can meet, one named skip each in the bash pass. Each
+  group was confirmed to fail under bash before being marked; three cases
+  first assumed binary-only (race not followed, the low descriptor limit,
+  `-e` at depth 90) pass under the native find and run in both. The
+  doubled pass exposed two function defects, now fixed: options after a
+  primary were ignored (`-n '*.c' -I`, `-r 'a|b' -E`), since translation
+  was one pass, so ff.fn.bash now sets options first, as ff.c's pre-pass
+  does; and a bad `-r` failed at walk time with status 4, so the native
+  find now compiles it first and a bad one is usage status 1, tag
+  6ab7ff09, without the reason only the binary adds.
+  Darwin run of the two-pass suite: the binary and parity passes clean,
+  the `./` wrapper confirmed on real BSD `-execdir`. The bash pass failed
+  3 cases, each BSD find itself, not the translator: `-delete ..` silent
+  with status 0 (ff refuses, 4; nothing deleted either way); `-L` tests a
+  directory closing a loop (r7 had filtered this in parity only); an
+  unreadable directory operand is not tested. Decided: pass them through,
+  not emulate, since each emulation would re-walk or re-evaluate the
+  expression beside the native find and none could be verified here. A
+  fourth, `-delete` of a non-empty directory (FreeBSD ignores ENOTEMPTY),
+  is added as a case. test.sh `nd "reason" probe` skips a case in the
+  bash pass only when a probe of the host's find shows the difference;
+  probes test behavior, never `uname`, so a host that changes runs the
+  case again. Noted, unchanged: refusing `..` or `/` spares only that
+  node; its contents are deleted in post-order, as find does.
+  Refusal covers the whole operand (same rev, on review): with -delete
+  in the expression, an operand whose last component is `..`, or that
+  is the root directory by device and inode (`/ // /. /usr/..`, `.`
+  run from `/`, under `-H` a symlink to `/`), is refused before any walk
+  below it, tag 6ab7ff37, bit 4; other operands proceed. Identity rather
+  than spelling, since `/.` and `.` from `/` name the root without
+  saying so. find and the earlier ff refused only the node and emptied
+  it in post-order. The refusal holds whether or not the expression
+  would reach -delete on that operand: the check is on the operand, not
+  the node. ff.fn.bash refuses the same operands before the native find
+  runs (`-ef /`, skipped for a symlink operand without -H), so the BSD
+  `..` difference above no longer reaches the native find and its probe
+  is retired. Tests carry `-d 0` on every root case, so a broken refusal
+  could only attempt rmdir on `/`.
+- r9 (rev 6adcb748): `-mode` and `-k[r][N]`. The permission query
+  moves from `-k` to `-mode`, a long primary like `-delete`, semantics
+  unchanged; messages read `-mode: ...` under the same tags (6ab7ff11,
+  6ab7ff46). `-k[r][N]` sorts printed records by cksh field N, as `-v`
+  lays it out: 1 inode, 2 links, 3 hash, 4 size, 5 mdate, 6 name; bare
+  `-k` is 6, `r` reverses. It is global like the options, the last one
+  wins, and N is attached, so in `-k 5` the 5 is a word, not N; `-k0`,
+  `-k7`, `-kx` are usage errors (tag 6ab7ff4c). Every record (`-f`,
+  `-v`, default print) is keyed by its node's stat, so `-v` is not
+  needed to sort by mtime or size. Values compare numerically (mdate
+  signed), names bytewise; ties go to the following fields, then walk
+  order. Records are held until the walk ends, terminators kept;
+  `-x`/`-j` output is not sorted. The hash is always `.`, so `-k3`
+  passes walk order through with nothing held. Methods: ff.c passes
+  output through one writer that can hold records, each carrying its
+  stat keys and walk sequence, sorted and written once the walk ends;
+  ff.fn.bash stats each record from the native find into decimal keys
+  and orders them with `sort -z -s -t TAB`, each key carrying its own
+  `n` and `r`; a sort without `-z -s` exits 2 (tag 6ab7ff4d).

@@ -1,13 +1,16 @@
-# ff
+## [src](../)
+# [ff](./)
 
 Functional find: NetBSD find(1) semantics where they matter, one letter per
 switch, the same behavior on Linux and Darwin.
+
+_(c) 2026 George Georgalis <george@iuxta.com> Unlimited use with attribution._
 
 ```
 ff . -t f -n '*.c'               C sources
 ff -E src -r '\.(c|h)$'          the same by regex (unanchored)
 ff . -n .git -z -o -t f -f       files, skipping .git trees
-ff . -t f -m -1 -v | sort -k5    changed today, cksh lines sorted by mtime
+ff -k5 . -t f -m -1              changed within a day, oldest first
 ff . -t f -x grep -l TODO {} +   grep per directory, race safe
 ff . -n '*.o' -delete            remove objects
 ```
@@ -23,9 +26,39 @@ scheme:
   request it exits 2 and names the binary. Load it with `. ff.fn.bash`; its
   body runs in a subshell, so only `ff` enters the caller's namespace.
 
-The same model as cksh: `-h` and
-`--help` are compiled in, the man page is generated from `--help`, and the
-test suite checks the two implementations against each other.
+A brief usage is provided with `-h`,
+the man page is generated from `--help`.
+```
+    Usage: ff [-EIHLDSXZV] [-k[r][N]] [--] [path ...] [expression]
+      options  -E ERE for -r  -I ignore case  -H/-L follow symlinks
+               -D post-order  -S sorted  -X one filesystem  -Z NUL output
+               -V show the native find command (ff.fn.bash)
+               -k[r][N] sort by cksh field N, default 6 name, r reverse
+      tests    -n glob  -p glob  -r re  -t fdlpsbc  -d [+-]N  -s [+-]N[ckMGT]
+               -m -a -c -b [+-]N[smhdw]  -w [+-][ ]([.][.]/file|HEX)
+               -u user  -g group  -l [+-]N  -i [+-]HEX  -y file (same node)  -e
+               -mode [+-]bits  -z (prune)  -0 (true)  -1 (false)
+      actions  -f print  -v cksh line  -x cmd {} ;|+  (in entry's dir)
+               -j cmd {} ;|+  (full path)  -delete  -q quit
+      logic    ( )  ! or -not  juxtaposition = and  -o or
+      -h this summary, --help the manual
+```
+The
+test suite runs its cases through both implementations and checks them
+against each other.
+
+<!--contents 2 3 pre="## Contents" post="---"-->
+
+## Files
+
+<https://github.com/georgalis/pub/tree/main/src/ff>
+- **[ff.c](./ff.c)** --- the program: C99 source for the `ff` binary, including the usage text and the manual source.
+- **[ff.fn.bash](./ff.fn.bash)** --- the bash function `ff`: translates the same switches into the host's native `find` argument list; carries help text generated from the binary.
+- **[makefile](./makefile)** --- builds `ff`, regenerates the help text in `ff.fn.bash` after the build, and runs `make test`.
+
+- **[README.md](./README.md)** --- this file: introduction, grammar, build, translator limits, verified state, and history.
+- **[PLAN.md](./PLAN.md)** --- design decisions and their rationale, recorded by revision.
+- **[test.sh](./test.sh)** --- the full suite, run twice (C binary, then bash function), with a byte-for-byte parity check between the two; host-dependent cases are skipped by named probe.
 
 ## Build
 
@@ -54,8 +87,9 @@ Linking by platform:
 ## Grammar
 
 `ff [options] [path ...] [expression]`, default path `.`, default action
-print. Options are uppercase and global, and may appear anywhere outside a
-primary's argument. Primaries are lowercase.
+print. Options are uppercase, and `-k`, and global, and may appear anywhere
+outside a primary's argument. Primaries are lowercase, the digits 0 and 1,
+or `-mode` and `-delete`.
 
 | option | find | |
 |--------|------|-|
@@ -65,8 +99,9 @@ primary's argument. Primaries are lowercase.
 | `-D` | `-d` / `-depth` | post-order |
 | `-S` | `-s` | sorted walk |
 | `-X` | `-x` / `-xdev` | one filesystem |
-| `-0` | `-print0` | NUL-terminated names |
+| `-Z` | `-print0` | NUL-terminated names |
 | `-V` | | bash function: print the native find command to stderr |
+| `-k[r][N]` | `\| sort` | sort output by cksh field N; see below |
 
 | primary | find | ff semantics |
 |---------|------|--------------|
@@ -77,20 +112,20 @@ primary's argument. Primaries are lowercase.
 | `-d [+-]N` | `-mindepth` `-maxdepth` | global walk bound |
 | `-s [+-]N[ckMGT]` | `-size` | bytes, exact, no rounding |
 | `-m -a -c -b [+-]N[smhdw]` | `-mtime` ... `-Btime` | age in seconds; default unit d |
-| `-w [+-]([.]/file\|HEX)` | `-newer` | when: after, before or at; see below |
-| `-same file` | `-samefile` | same device and inode |
-| `-k [+-]mode` | `-perm` | a query, see below |
+| `-w [+-][ ]([.][.]/file\|HEX)` | `-newer` | when: after, before or at; see below |
+| `-y file` | `-samefile` | same device and inode |
+| `-mode [+-]bits` | `-perm` | a query, see below |
 | `-u` `-g` | `-user` `-group` | |
 | `-l [+-]N` | `-links` | |
 | `-i [+-]HEX` | `-inum` | hex, as `-v` prints it |
 | `-e` | `-empty` | |
 | `-z` | `-prune` | |
-| `-true` `-false` | `-true` `-false` | |
+| `-0` `-1` | `-true` `-false` | |
 | `-f` | `-print` | |
 | `-v` | `-ls` | cksh line, identical to `cksh -n0 -x0` |
 | `-x cmd ... ;` / `{} +` | `-execdir` | runs in the node's verified directory |
 | `-j cmd ... ;` / `{} +` | `-exec` | full path, race exposed like find |
-| `-delete` | `-delete` | the one long switch, by design |
+| `-delete` | `-delete` | a long switch to confirm |
 | `-q` | `-quit` / `-exit` | |
 
 Operators: `( )`, `!` or `-not`, juxtaposition for and, `-o`. The shell
@@ -103,10 +138,13 @@ timestamp. With a hex epoch second, the mdate column of `ff -v`, the
 comparison is by whole seconds: `-w -6abb2e78` modified before that
 second. A file always begins with `./`, `../` or `/`, and anything else
 must be hex, so no word is both: a file named `cafe` or `6abb2e78` is
-`./cafe`, `./6abb2e78`. Before rev 6abb42b9, bare `-w file` meant "newer";
-it is now an error, and newer is `-w +./file`.
+`./cafe`, `./6abb2e78`. The sign may stand apart as its own word, so
+`-w + ./ref` is `-w +./ref` and `-w - 6abb2e78` is `-w -6abb2e78`; the
+word after a lone sign takes no sign of its own.
 
-`-k` asks about permission bits rather than doing chmod arithmetic, and
+The primaries `-0` and `-1` are read as true and false.
+
+`-mode` asks about permission bits rather than doing chmod arithmetic, and
 its `+` and `-` keep ff's sense of more and less:
 
 - Octal: `0755` exactly; `+0755` at least (every bit, maybe more, find
@@ -116,14 +154,32 @@ its `+` and `-` keep ff's sense of more and less:
   clause; with no class, `+x` means someone may execute and `-x` no one
   may. `X` is execute that only a directory satisfies, `s` setuid (`u`) or
   setgid (`g`), `t` the sticky bit. With no class, each class is tested
-  with only the bits it can hold, so `-k +rs` holds for a 0644 file
-  (other has `r` and can hold no `s`); `-k u+rs` needs both in one class.
+  with only the bits it can hold, so `-mode +rs` holds for a 0644 file
+  (other has `r` and can hold no `s`); `-mode u+rs` needs both in one
+  class.
 
 ```
-ff . -t f -k o+w        world-writable files
-ff . -k +s              setuid or setgid
-ff . -not -k go-w       group or other may write
-ff . -k o-X             directories others may not search
+ff . -t f -mode o+w     world-writable files
+ff . -mode +s           setuid or setgid
+ff . -not -mode go-w    group or other may write
+ff . -mode o-X          directories others may not search
+```
+
+`-k[r][N]` sorts what ff prints by cksh field N, the layout of `-v`:
+1 inode, 2 links, 3 hash, 4 size, 5 mdate, 6 name. Bare `-k` is `-k6`,
+and `r` reverses. Every record, from `-f`, `-v` or the default print, is
+keyed by its node's stat, so `-v` is not needed to sort by mtime or size.
+Numbers compare by value (mdate signed), names bytewise; ties go to the
+following fields, then walk order. Records are held until the walk ends
+and written with their own terminators (`-Z` NUL); `-x` and `-j` output
+is not sorted, and after `-q` the records printed so far are. The hash is
+always `.` in ff, so `-k3` and `-kr3` keep walk order and hold nothing.
+`-k` is global like the options; N is attached, so in `-k 5` the 5 is a
+path. `-k0`, `-k7` and `-kx` are usage errors (tag 6ab7ff4c).
+
+```
+ff -k5 . -t f -m -1     changed within a day, oldest first
+ff -kr4 . -t f -v       cksh lines, largest first
 ```
 
 `-x` or `-j`: `-j` passes the full path, and the child looks every
@@ -133,11 +189,17 @@ changes into the directory ff already opened and verified, then passes
 `./name`, so only the last component is resolved again. `-x` refuses to run
 when `PATH` holds a relative or empty element, since the working directory
 is the walked one. `-delete` removes through the same verified parent
-descriptor.
+descriptor. It refuses an operand whole, walking nothing below it, when
+the operand ends in `..` or is the root directory itself: `/`, `//`,
+`/.`, `/usr/..`, `.` run from `/`, or under `-H` a symlink to `/`. The
+root is found by device and inode, not by spelling. find refuses only
+the node and still empties it; ff reports status 4 and leaves it whole.
+An operand `.` keeps find's meaning: its contents are walked and it is
+kept.
 
 ## Output safety
 
-Names go out as raw bytes to a pipe or with `-0`. On a terminal, C0 and C1
+Names go out as raw bytes to a pipe or with `-Z`. On a terminal, C0 and C1
 control characters, DEL and invalid UTF-8 print as `\ooo`, so a crafted file
 name cannot drive the terminal. Diagnostics on a terminal follow the same
 rule.
@@ -223,11 +285,28 @@ Each of these exits 2 and names the binary:
 - `-r` back-references under `-E` (the translator wraps the pattern in a
   group to make it unanchored);
 - `-v` combined with `-f`, `-x`, `-j` or `-delete`;
+- `-k` where `sort` lacks `-z` or `-s` (records are sorted by
+  `sort -z -s -t TAB` on decimal stat keys);
 - `-S` combined with `-x`, `-j`, `-delete` or `-q` on GNU find, which has
   no sorted walk. Plain `-S` output is emulated there by sorting each
   operand's paths with `/` as the lowest byte.
 
 A path operand beginning with `-` also exits 2.
+
+Where the native find itself differs, the function passes the difference
+through rather than emulate a walk it does not own. BSD find (seen on
+Darwin):
+
+- `-delete` of a directory that is not empty is expected to be silent,
+  status 0, where ff reports status 4 (FreeBSD ignores `ENOTEMPTY`; the
+  test probes the host);
+- under `-L`, a directory that closes a loop is tested, where ff and GNU
+  find skip it;
+- an unreadable directory named as an operand is not tested, where ff
+  lists it, with status 4.
+
+test.sh probes the host's find for each and skips that case in the bash
+pass only where the host behaves so.
 
 `-w` uses `-newermt @S.N` where the native find takes it (GNU). Elsewhere
 (Darwin, BSD) it writes reference files at the needed instants with
@@ -237,10 +316,20 @@ the run, and `-V` names it. Sub-second file comparisons then depend on
 the native `-newer`; HEX forms are whole seconds either way. Where `date`,
 `touch -d` or a nanosecond `stat` is missing, those forms exit 2.
 
-Where the native find has no `-samefile` (NetBSD), `-same` uses the
+Where the native find has no `-samefile` (NetBSD), `-y` uses the
 reference's inode number from `stat` as `-inum`. find has no primary for
 the device, so that is exact unless the walk crosses into another
 filesystem holding the same inode number; `-V` shows which form ran.
+
+`-x` must hand each command `./name`, as the binary does, so a name such
+as `-rf` is never read as an option. GNU `-execdir` gives `./name`; BSD
+`-execdir` gives the bare name (seen on Darwin). The function probes which
+once per call. For bare names it runs the command through a fixed
+`/bin/sh -c` script that prefixes `./` to each `{}` name and every `+`
+name: the command and its words reach the script as arguments and are
+never evaluated, and the script ends in `exec`, so the status is the
+command's own. `-V` shows the wrapped form. `FF_BARE_EXECDIR=1` forces it,
+for testing on GNU.
 
 `-V` prints the native command before running it, quoted to paste back
 into a shell, as a starting point for an OS-specific find command:
@@ -252,17 +341,34 @@ find . \( -name \*.h -newer ./Makefile \) -print
 
 ## Verified
 
-- `make test` passes, 325 cases, under GNU make on Linux (glibc 2.39): gcc
-  and clang, a gcc build with ASan and UBSan, and as root and non-root.
-  Root skips the unreadable-directory case. gcc and clang compile ff.c
-  clean under `-Werror`, including a syntax check of the Darwin branch.
+- `make test` runs every behavior case twice, once through the binary
+  and once through the bash function, then a parity pass comparing the
+  two byte for byte, with a tally for each. The function skips only the
+  cases it cannot meet, in named groups: status bits 8, 16 and 32 and
+  status 2 for a full stdout (the native find reports any failure as 1,
+  read as 4); the binary's `-V` note; `-x` with an absolute command under
+  a relative `PATH` (GNU find refuses `-execdir` whatever the command); a
+  path operand beginning with `-`; walk diagnostics in chkerr form (the
+  native find writes its own).
+- It passes under GNU make on Linux (glibc 2.39, GNU find 4.9, bash 5.2):
+  613 cases non-root, 609 as root, which skips the unreadable-directory
+  cases; with gcc and clang, and a gcc build with ASan and UBSan; again
+  with `TMPDIR` behind a symlink, as Darwin's `/tmp` is. gcc and clang
+  compile ff.c clean under `-Werror -Wpedantic`.
 - The walk matches GNU find 4.9 on each primary it shares.
-- Darwin (arm64, Apple clang): builds clean; the first `make test` of rev
-  6abb34a2 found test-host assumptions (PATH, time zone, setgid group,
-  exported shell functions, BSD find loop entries) and the missing
-  `-newermt @` in Darwin find. test.sh is now independent of those, and
-  each condition was reproduced and passed on Linux; the Darwin re-run is
-  pending.
+- Darwin (arm64, Apple clang): builds clean. The `make test` of rev
+  6abb42b9 failed 4 of 325. Two came from `/tmp` being a symlink to
+  `/private/tmp`: `-x pwd` prints the physical path, and test.sh now works
+  in `pwd -P`. Two were BSD `-execdir` passing bare names to the bash
+  function, which now adds `./` (see Bash translator limits). The first
+  was reproduced on Linux with a symlinked `TMPDIR`; the second is
+  exercised on Linux only through `FF_BARE_EXECDIR`, since GNU find cannot
+  give bare names. The `make test` of rev 6abc5da8 then passed on Darwin
+  in the binary pass (224 cases, `/dev/full` absent) and the parity pass,
+  including the `./` wrapper on real BSD `-execdir`. Its bash pass failed
+  3 cases, each a BSD find difference listed under Bash translator
+  limits; they are now probed and skipped there, and the Darwin re-run of
+  that change is pending.
 - Not yet run under bmake or on NetBSD. The makefile avoids every
   construct bmake rejects, but it is unverified there.
 
@@ -271,8 +377,19 @@ See `PLAN.md` for the design record and the decisions log.
 ## History
 
 ```
+rev 6adcb748 20261024 064856 PDT Sat 06:48 AM 24 Oct 2026
+    -mode is the permission query, was -k; -k[r][N] sorts output by cksh
+    field N (1 inode 2 links 4 size 5 mdate 6 name, default 6), keyed by
+    node stat, no -v needed; -k3 passes walk order through, unbuffered
+rev 6abc5da8 20260929 175400 PDT Tue 05:54 PM 29 Sep 2026
+    -0 true and -1 false replace -true -false; -Z NUL output (was -0);
+    -y replaces -same; -w [+-][ ]([.][.]/file|HEX): the sign may stand
+    apart; -delete is a long switch to confirm; ff.fn.bash gives -x
+    ./name where BSD -execdir passes a bare name; test.sh in the
+    physical work directory (Darwin /tmp is /private/tmp); -delete
+    refuses an operand ending in .., or the root directory, whole
 rev 6abb42b9 20260928 214649 PDT Mon 09:46 PM 28 Sep 2026
-    -w when [+-]([.]/file|HEX): before, after or at a file's mtime or a
+    -w when [+-]([.][.]/file|HEX): before, after or at a file's mtime or a
     hex epoch second, a file taking ./ ../ or /; -same, -true, -false;
     -i reads hex; -V shows the native find command, reference files where
     find lacks -newermt; grouped examples; Darwin test fixes
@@ -287,7 +404,3 @@ org 6ab7fec8 20260926 102008 PDT Sat 10:20 AM 26 Sep 2026
     bash translator ff.fn.bash for the native find
 ```
 
-## Copyright
-
-(c) 2026 George Georgalis <george@iuxta.com>
-Unlimited use with attribution.

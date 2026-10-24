@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
 
 ff () ( # functional find: ff grammar run by the host's native find; companion ff.c
+  # rev 6adcb748 20261024 064856 PDT Sat 06:48 AM 24 Oct 2026
+  #     -mode (was -k); -k[r][N] sorts held records with sort -z -s -t TAB,
+  #     decimal stat keys, each key with its own n and r; -k3 passes through
+  # rev 6abc5da8 20260929 175400 PDT Tue 05:54 PM 29 Sep 2026
+  #     -0 true, -1 false, -Z NUL, -y same node; -w [+-][ ] sign apart;
+  #     -x ./name through a fixed /bin/sh where BSD -execdir passes a bare name;
+  #     options set before translation (-n x -I); a bad -r is a usage error;
+  #     -delete refuses an operand ending in .. or the root directory whole
   # rev 6abb42b9 20260928 214649 PDT Mon 09:46 PM 28 Sep 2026
-  #     -w when [+-]([.]/file|HEX), -same, -true -false, -i hex, -V, examples;
+  #     -w when [+-]([.][.]/file|HEX), -same, -true -false, -i hex, -V, examples;
   #     Darwin test fixes; ff.fn.bash -w reference files without -newermt
   # rev 6ab89f43 20260926 214451 PDT Sat 09:44 PM 26 Sep 2026
   #     -k permission query (at least/at most, has/lacks, X s t), -not, "not" diagnostics
@@ -22,7 +30,7 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
     } # _ffbad
 
   _ff_tok () { # word that starts the expression
-    [[ "$1" =~ ^(!|-not|\(|\)|-o|-delete|-true|-false|-same|-[nprtdsmacbwkuglixjezfvq])$ ]]
+    [[ "$1" =~ ^(!|-not|\(|\)|-o|-delete|-mode|-[nprtdsmacbwuglixjezfvqy01])$ ]]
     } # _ff_tok
 
   _ff_ns () { # mtime of $1 as S.NNNNNNNNN by the symlink policy: GNU stat, then BSD stat
@@ -47,9 +55,12 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
     touch -d "$iso.${ns}Z" -- "$rf" 2>/dev/null
     } # _ff_ref
 
-  _ff_when () { # -w [+-]([.]/file|HEX) into native terms, as ff.c N_NEWER
-    local w="$1" sg= at= pr= up= lo=
+  _ff_when () { # -w [+-][ ]([.][.]/file|HEX) into native terms, as ff.c N_NEWER
+    # $1 the word, or a lone sign with the word in $2; diagnostics then name $2
+    local w="$1" ow="$1" sg= at= pr= up= lo=
     sg="${w:0:1}" ; [[ "$sg" == [+-] ]] && w="${w:1}" || sg=
+    [ -n "$sg" ] && [ -z "$w" ] && { w="$2" ; ow="$2" ;} || :
+    [[ "$w" == [+-]* ]] && { _ffbad "-w: file is [.][.]/file, time is HEX, not" 6ab7ff4b "$ow" ; return 1 ;} || :
     if [[ "$w" == /* || "$w" == ./* || "$w" == ../* ]]; then
       { [ -n "$H$L" ] && [ -e "$w" ] ;} || { [ -z "$H$L" ] && { [ -e "$w" ] || [ -L "$w" ] ;} ;} \
         || { _ffbad "-w: cannot stat" 6ab7ff10 "$w" ; return 1 ;}
@@ -57,11 +68,11 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
       at=$(_ff_ns "$w") && [ -n "$at" ] || { chkerr "ff : -w needs a stat with nanoseconds, use ff.c '$w' (6ab7ff4a)" ; return 2 ;}
       pr=$(_ff_pred "$at") ; up="$w"
     elif [[ "$w" =~ ^[0-9a-fA-F]{1,16}$ ]]; then
-      ((${#w}==16)) && [[ "$w" == [89a-fA-F]* ]] && { _ffbad "time overflows" 6ab7ff0f "$1" ; return 1 ;} || :
+      ((${#w}==16)) && [[ "$w" == [89a-fA-F]* ]] && { _ffbad "time overflows" 6ab7ff0f "$ow" ; return 1 ;} || :
       # whole seconds: +T after second T, -T before it, T within it
       at="$((16#$w)).999999999" ; pr="$((16#$w - 1)).999999999"
     else
-      _ffbad "-w: file is ./file or /file, time is HEX, not" 6ab7ff4b "$1" ; return 1
+      _ffbad "-w: file is [.][.]/file, time is HEX, not" 6ab7ff4b "$ow" ; return 1
     fi
     # -newermt @S.N where the native find takes it (GNU); else reference files and -newer
     [ -z "$FF_NO_NEWERMT" ] && command find /dev/null -maxdepth 0 -newermt @0 >/dev/null 2>&1 && {
@@ -78,6 +89,30 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
     esac || { chkerr "ff : -w needs -newermt or touch -d and date, use ff.c (6ab7ff4a)" ; return 2 ;}
     } # _ff_when
 
+  _ff_opts () { # options are global, as ff.c's pre-pass: set before translating any
+    # primary; primary arguments and exec words are skipped, -- ends options
+    # until the expression starts
+    local a= e= x= i= p=
+    while (($#)); do
+      a="$1" ; shift
+      [ -z "$e" ] && [[ "$a" =~ ^-[EIHLDSXZV]+$ ]] && {
+        for ((i=1; i<${#a}; i++)); do case "${a:i:1}" in
+          E) E=1 ;; I) I=1 ;; H) H=1 L= ;; L) L=1 H= ;; D) D=1 ;; S) S=1 ;; X) X=1 ;; Z) Z=1 ;; V) V=1 ;;
+        esac ; done ; continue ;} || :
+      [ -z "$e$x" ] && [ "$a" = "--" ] && { e=1 ; continue ;} || :
+      _ff_tok "$a" && x=1 || continue
+      [[ "$a" =~ ^-[nprtdsmacbwugliy]$|^-mode$ ]] && (($#)) && {
+        [ "$a" = -w ] && [[ "$1" == [+-] ]] && (($# > 1)) && shift || :
+        shift ; continue ;} || :
+      [[ "$a" =~ ^-[xj]$ ]] && { p="$a"
+        while (($#)); do
+          [ "$1" = ";" ] && break || : ; [ "$1" = "+" ] && [ "$p" = "{}" ] && break || :
+          p="$1" ; shift
+        done
+        (($#)) && shift || : ;} || :
+    done
+    } # _ff_opts
+
   _ff_show () { # -V: the native command on stderr, quoted to paste back into a shell
     [ -n "$V" ] || return 0
     local q= w= ; for w in "$@"; do printf -v w '%q' "$w" ; q+="${q:+ }$w" ; done
@@ -85,7 +120,7 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
     [ -z "$wd" ] || stderr "# reference files under $wd are removed after the run"
     } # _ff_show
 
-  _ff_perm () { # -k into native -perm terms, as ff.c parse_perm and p_perm
+  _ff_perm () { # -mode into native -perm terms, as ff.c parse_perm and p_perm
     # octal: exact, +superset, -subset; symbolic: [ugoa]*[+-]?[rwxXst]+ clauses, + has, - lacks
     local v="$1" w= p= sg= cl= c= b= i= X= all= first=
     local -a cls=() cb=() t=() R=(0400 040 04) W=(0200 020 02) E=(0100 010 01) S=(04000 02000 0) T=(0 0 01000) L=(u g o)
@@ -101,7 +136,7 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
       ((${#t[@]})) || t=('(' -type d -o ! -type d ')')   # -7777: every mode
       ex+=('(' "${t[@]}" ')') ; return 0 ;}
     [[ "$v" =~ ^[ugoa]*[-+]?[rwxXst]+(,[ugoa]*[-+]?[rwxXst]+)*$ ]] \
-      || { _ffbad "-k: bad mode" 6ab7ff11 "$v" ; return 1 ;}
+      || { _ffbad "-mode: bad mode" 6ab7ff11 "$v" ; return 1 ;}
     IFS=, read -ra cls <<<"$v"
     ex+=('(')
     for cl in "${cls[@]}"; do
@@ -112,7 +147,7 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
         [ -n "$w" ] && [[ "$w" != *a* ]] && [[ "$w" != *"${L[c]}"* ]] && continue || :
         case "${p:i:1}" in r) b=${R[c]} ;; w) b=${W[c]} ;; x|X) b=${E[c]} ;; s) b=${S[c]} ;; t) b=${T[c]} ;; esac
         [[ "${p:i:1}" == [st] ]] && ((b==0)) && [ -n "$w" ] && [[ "$w" != *a* ]] \
-          && { _ffbad "-k: s is for u or g, t is for o, not" 6ab7ff46 "$v" ; return 1 ;} || :
+          && { _ffbad "-mode: s is for u or g, t is for o, not" 6ab7ff46 "$v" ; return 1 ;} || :
         cb[c]=$((cb[c] | b)) ; [ "${p:i:1}" = X ] && X=1 || :
       done ; done
       all=$((cb[0] | cb[1] | cb[2]))
@@ -129,19 +164,40 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
     ex+=(')')
     } # _ff_perm
 
-  _ff_rec () { # one record from the native find: -v line, NUL, escaped, or raw
+  _ff_rec () { # one record from the native find: -v line, NUL, escaped, or raw;
+    # under -k held in kr, keyed by its stat as cksh fields, for _ff_put after the walk
     local LC_ALL=C a= b= c= t= s= fmt=
-    [ -n "$ls" ] && {
+    [ -n "$ls$sk" ] && {
       [ "$(uname)" = Linux ] && fmt=(stat ${L:+-L} -c '%i %h %s %Y %F') || fmt=(stat ${L:+-L} -f '%i %l %z %m %HT')
       read -r a b c t s < <("${fmt[@]}" -- "$1" 2>/dev/null) || :
       [[ "$a $b $c $t" =~ ^[0-9]+\ [0-9]+\ [0-9]+\ -?[0-9]+$ ]] || { chkerr "ff : cannot stat '$1' (6ab7ff32)" ; rc=$((rc|4)) ; return 0 ;}
       case "${s,,}" in directory) s=/ ;; symbolic*) s=@ ;; fifo*) s='|' ;; socket) s='=' ;; *) s= ;; esac
-      printf '%8x %2x . %8x %08x ' "$a" "$b" "$c" "$t"
-      [ -t 1 ] && _ffesc "$1" || printf '%s' "$1"
-      printf '%s\n' "$s" ; return 0 ;}
-    [ -n "$Z" ] && { printf '%s\0' "$1" ; return 0 ;}
-    [ -t 1 ] && { _ffesc "$1" ; printf '\n' ;} || printf '%s\n' "$1"
+      # field 3, the hash, carries the -v indicator, . for none
+      [ -n "$sk" ] && { kr+=("$a"$'\t'"$b"$'\t'"${s:-.}"$'\t'"$c"$'\t'"$t"$'\t'"$1") ; return 0 ;}
+      _ff_put "$a" "$b" "$s" "$c" "$t" "$1" ; return 0 ;}
+    _ff_put "" "" "" "" "" "$1"
     } # _ff_rec
+
+  _ff_put () { # print one record: inode links indicator size mdate name
+    local LC_ALL=C
+    [ -n "$ls" ] && { printf '%8x %2x . %8x %08x ' "$1" "$2" "$4" "$5"
+      [ -t 1 ] && _ffesc "$6" || printf '%s' "$6"
+      printf '%s\n' "$3" ; return 0 ;}
+    [ -n "$Z" ] && { printf '%s\0' "$6" ; return 0 ;}
+    [ -t 1 ] && { _ffesc "$6" ; printf '\n' ;} || printf '%s\n' "$6"
+    } # _ff_put
+
+  _ff_ksort () { # -k: held records by field sk, ties to the following fields, then
+    # walk order (-s); r reverses each key, since a key with modifiers takes no global -r
+    local LC_ALL=C f= i= r= ; local -a ks=() v=()
+    for i in 1 2 4 5; do ((i>=sk)) && ks+=(-k$i,$i"n$sr") || : ; done ; ks+=(-k6"$sr")
+    ((${#kr[@]})) || return 0
+    while IFS= read -r -d '' f; do
+      v=() ; for i in 1 2 3 4 5; do v+=("${f%%$'\t'*}") ; f="${f#*$'\t'}" ; done
+      [ "${v[2]}" = . ] && v[2]= || :
+      _ff_put "${v[@]}" "$f"
+    done < <(printf '%s\0' "${kr[@]}" | sort -z -s -t $'\t' "${ks[@]}")
+    } # _ff_ksort
 
   _ff_sorted () { # GNU find has no -s: sort each path with / as the lowest byte
     # pre-order: a < a/b < a.c.  post-order (-D) adds a \002 terminator: a/b < a < a.c
@@ -182,14 +238,15 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 
   _ff_usage () { # ff -h, identical to ff.c usage_text
 	cat <<-'eof'
-	Usage: ff [-EIHLDSX0V] [--] [path ...] [expression]
+	Usage: ff [-EIHLDSXZV] [-k[r][N]] [--] [path ...] [expression]
 	  options  -E ERE for -r  -I ignore case  -H/-L follow symlinks
-	           -D post-order  -S sorted  -X one filesystem  -0 NUL output
+	           -D post-order  -S sorted  -X one filesystem  -Z NUL output
 	           -V show the native find command (ff.fn.bash)
+	           -k[r][N] sort by cksh field N, default 6 name, r reverse
 	  tests    -n glob  -p glob  -r re  -t fdlpsbc  -d [+-]N  -s [+-]N[ckMGT]
-	           -m -a -c -b [+-]N[smhdw]  -w [+-](./file|HEX)  -k [+-]mode
-	           -u user  -g group  -l [+-]N  -i [+-]HEX  -same file  -e
-	           -z (prune)  -true  -false
+	           -m -a -c -b [+-]N[smhdw]  -w [+-][ ]([.][.]/file|HEX)
+	           -u user  -g group  -l [+-]N  -i [+-]HEX  -y file (same node)  -e
+	           -mode [+-]bits  -z (prune)  -0 (true)  -1 (false)
 	  actions  -f print  -v cksh line  -x cmd {} ;|+  (in entry's dir)
 	           -j cmd {} ;|+  (full path)  -delete  -q quit
 	  logic    ( )  ! or -not  juxtaposition = and  -o or
@@ -203,18 +260,19 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	  ff - functional find: walk file trees, one letter per switch
 
 	SYNOPSIS
-	  ff [-EIHLDSX0V] [--] [path ...] [expression]
+	  ff [-EIHLDSXZV] [-k[r][N]] [--] [path ...] [expression]
 	  ff -h | --help
 
 	DESCRIPTION
 	  ff walks each path (default .) and evaluates the expression for every
 	  node, as find(1) does, with one letter per switch. Options are
-	  uppercase and global; they may appear anywhere except as the argument
-	  of a primary. Primaries are lowercase. With no action in the
-	  expression, each node for which it is true is printed.
+	  uppercase, and -k, and global; they may appear anywhere except as
+	  the argument of a primary. Primaries are lowercase, the digits 0 and
+	  1, or -mode and -delete. With no action in the expression, each node
+	  for which it is true is printed.
 
 	  Printed paths are the operand, then / and each name below it. Output
-	  is raw bytes when stdout is not a terminal or -0 is given. On a
+	  is raw bytes when stdout is not a terminal or -Z is given. On a
 	  terminal, C0 and C1 control characters, DEL and bytes that are not
 	  valid UTF-8 print as \ooo octal escapes, so a crafted name cannot
 	  drive the terminal; names in diagnostics follow the same rule.
@@ -231,7 +289,16 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	  -D     post-order: a directory is tested after its contents
 	  -S     sorted walk: each directory's names in bytewise order
 	  -X     do not descend into directories on other filesystems
-	  -0     end names from -f and the default print with NUL, not newline
+	  -Z     end names from -f and the default print with NUL, not newline
+	  -k[r][N]
+	         sort what ff prints by cksh field N, as -v lays it out:
+	         1 inode, 2 links, 3 hash, 4 size, 5 mdate, 6 name; -k is
+	         -k6, r reverses. Each record, from -f, -v or the default
+	         print, is keyed by its node, so -k5 orders names by mtime
+	         without -v. Numbers compare by value, names bytewise; ties go
+	         to the following fields, then walk order. Records are held
+	         until the walk ends; -x and -j output is not sorted. The hash
+	         is always ., so -k3 keeps walk order and holds nothing.
 	  --     end of options: following words are paths, even with a
 	         leading -, until a primary or operator
 	  -V     ff.fn.bash only: print the native find command to stderr
@@ -240,8 +307,8 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	  -h     short usage;  --help  this manual
 
 	PRIMARIES
-	  N is decimal: +N more than N, -N less than N, N exactly. HEX is
-	  hexadecimal without 0x, as ff -v prints it.
+	  N           decimal: +N more than N, -N less than N, N exactly.
+	  HEX         hexadecimal without 0x, as ff -v prints it.
 	  -n glob     last component of the examined pathname matches glob
 	  -p glob     examined pathname matches glob
 	              The special shell pattern characters [ ] * and ? may be
@@ -260,14 +327,15 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	              to 8 days
 	  -a -c -b    the same for access, status change and birth time;
 	              -b is false where the filesystem records no birth time
-	  -w [+-]([.]/file|HEX)
+	  -w [+-][ ]([.][.]/file|HEX)
 	              when: modified after (+), before (-) or at the same time
 	              as file's mtime, or as HEX epoch seconds (the -v mdate).
 	              A file begins with ./ ../ or /, so no word is both a file
 	              and a time. A file compares the full timestamp, HEX
-	              whole seconds. find -newer file is -w +./file.
-	  -same file  the same node as file: same device and inode
-	  -k mode     permission bits. Octal, all twelve bits:
+	              whole seconds. The sign may stand apart as its own word:
+	              -w + ./file is -w +./file. find -newer file is -w +./file.
+	  -y file     the same node as file: same device and inode
+	  -mode bits  permission bits. Octal, all twelve bits:
 	                0755     exactly 0755
 	                +0755    at least 0755: every bit of it, maybe more
 	                -0755    at most 0755: no bit outside it, maybe fewer
@@ -282,27 +350,29 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	              with u, setgid with g, either with no class, both with
 	              a; t is the sticky (/tmp) bit, alone or with o.
 	              With no class, each class is tested with only the bits
-	              it can hold, so -k +rs holds when other has r, since
-	              other has no s; name the class to need both: -k u+rs.
-	                -k u+x           owner may execute
-	                -k x             someone may execute (same as +x)
-	                -k -x            no one may execute
-	                -k o-X           directories others may not search
-	                -k o-r           others may not read
-	                -k w             someone may write
-	                -k o+w           world writable
-	                -k go-w          neither group nor other may write
-	                -not -k go-w     group or other may write
-	                -k u+s  -k g+s   setuid; setgid
-	                -k +s            setuid or setgid
-	                -k +t            sticky
-	              Either of two bits in one class: -k u+r -o -k u+x
+	              it can hold, so -mode +rs holds when other has r,
+	              since other has no s; name the class to need both:
+	              -mode u+rs.
+	                -mode u+x        owner may execute
+	                -mode x          someone may execute (same as +x)
+	                -mode -x         no one may execute
+	                -mode o-X        directories others may not search
+	                -mode o-r        others may not read
+	                -mode w          someone may write
+	                -mode o+w        world writable
+	                -mode go-w       neither group nor other may write
+	                -not -mode go-w  group or other may write
+	                -mode u+s        setuid
+	                -mode g+s        setgid
+	                -mode +s         setuid or setgid
+	                -mode +t         sticky
+	              Either of two bits in one class: -mode u+r -o -mode u+x
 	  -u user     owner, name or number;  -g group  group, name or number
 	  -l [+-]N    link count
 	  -i [+-]HEX  inode number, hex as ff -v prints it
 	  -e          empty regular file or directory
 	  -z          prune: do not descend into this directory; true
-	  -true       always true;  -false  always false
+	  -0          always true;  -1  always false
 
 	ACTIONS
 	  -f          print the path; explicit form for use with -o
@@ -313,8 +383,10 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	  -x cmd ... {} +    the same, many names per run, per directory
 	  -j cmd ... ;       run cmd from the current directory, {} as the path
 	  -j cmd ... {} +    the same, many paths per run
-	  -delete     remove the node; implies -D; refused with -L and for
-	              .. and /; . is skipped silently
+	  -delete     remove the node; implies -D; refused with -L. An operand
+	              ending in .., or that is the root directory (/, /., or .
+	              run from /), is refused whole and not walked (4); an
+	              operand . is walked and kept itself, as find does
 	  -q          stop the walk; pending + batches still run
 
 
@@ -331,14 +403,14 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	  escape them with a backslash or quote them: \( \) \; '*.c'.
 	    ff . -n '*.c' -o -n '*.h' -t f          .c of any type, or .h files
 	    ff . \( -n '*.c' -o -n '*.h' \) -t f    .c and .h files only
-	    ff . -k u+r -o -k u+x                   owner may read or execute
+	    ff . -mode u+r -o -mode u+x             owner may read or execute
 	  With no action in the expression, a node is printed when the whole
 	  expression is true. Once any action appears (-f -v -x -j -delete
 	  -q), only actions print. Prune directories by name and print the
 	  files that are not RCS (,v) or backup (~) files:
 	    ff . \( -n .git -o -n tmp \) -z -t f -o -t f -not -E -r ',v$|~$'
 	  -z is true, so the -t f after it makes that side false for the
-	  pruned directories; -z -false does the same. Options such as -E
+	  pruned directories; -z -1 does the same. Options such as -E
 	  may appear anywhere, even after -not.
 
 	EXEC
@@ -372,10 +444,11 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	  global bound; {} is never replaced inside a larger word; names are
 	  escaped on a terminal; -I replaces -iname, -ipath and -iregex;
 	  -w is when, before, after or at (find -newer is -w +./file); -i
-	  reads hex, as ff -v prints the inode;
-	  -k symbolic modes are queries, not chmod arithmetic, and octal
-	  +mode (at least) and -mode (at most) read the opposite way to
-	  find -perm -mode.
+	  reads hex, as ff -v prints the inode; -0 -1 -y are find -true
+	  -false -samefile, and -Z is -print0;
+	  -mode is not find -perm: symbolic modes are queries, not chmod
+	  arithmetic, and octal +N (at least) and -N (at most) read the
+	  opposite way to find -perm -N; -k sorts what find leaves to sort(1).
 
 	EXAMPLES
 	  Options
@@ -386,7 +459,9 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	    ff -I . -n '*.jpg'                  .jpg .JPG .Jpg
 	    ff -E . -r '/(src|lib)/[^/]*\.c$'   C files directly in src or lib
 	    ff -D src                           each directory after its contents
-	    ff -0 . -t f -s +1M | xargs -0 ls -l   large files, any names
+	    ff -Z . -t f -s +1M | xargs -0 ls -l   large files, any names
+	    ff -k5 . -t f -m -1                 changed within a day, oldest first
+	    ff -kr4 . -t f -v                   cksh lines, largest first
 	    ff -V . -n '*.h'                    ff.fn.bash: show the find command
 	  Primaries
 	    ff . -n '[A-Z]*.[ch]'               capitalized C sources and headers
@@ -400,15 +475,16 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	    ff . -t f -c -1 -o -b -1            changed or born within a day
 	    ff . -w +./Makefile -n '*.c'        sources newer than Makefile
 	    ff . -w -6abb2e78                   modified before that second
-	    ff . -t f -k o+w                    world-writable files
-	    ff / -X -t f -k +s                  setuid or setgid files
+	    ff . -w - ./Makefile -n '*.c'       sources older, the sign apart
+	    ff . -t f -mode o+w                 world-writable files
+	    ff / -X -t f -mode +s               setuid or setgid files
 	    ff . -u root -o -g 0                owned by root or by group 0
 	    ff . -t f -l +1 -v                  hard-linked files, with inodes
 	    ff . -i 1cc01d                      the node -v showed as 1cc01d
-	    ff . -same notes.txt                notes.txt and its hard links
+	    ff . -y notes.txt                   notes.txt and its hard links
 	    ff . -e                             empty files and directories
 	  Actions
-	    ff . -t f -v | sort -k5             cksh lines, oldest first
+	    ff -k5 . -t f -v                    cksh lines, oldest first
 	    ff . -n core -t f -f -q             the first core file, then stop
 	    ff . -n '*.o' -delete               remove objects
 	    ff build -d +0 -t d -e -delete      remove empty directories below
@@ -425,11 +501,11 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	  Operators
 	    ff . \( -n '*.c' -o -n '*.h' \) -not -p '*/vendor/*'
 	                                        C files outside vendor trees
-	    ff . \( -n .git -o -n tmp \) -z -false -o -t f
+	    ff . \( -n .git -o -n tmp \) -z -1 -o -t f
 	                                        files, pruning two directory names
-	    ff . -t f \( -j grep -q TODO {} \; -j echo todo: {} \; -o -true \) -f
+	    ff . -t f \( -j grep -q TODO {} \; -j echo todo: {} \; -o -0 \) -f
 	                                        every file, TODO files marked first
-	    ff . -t f -not -k u+w -f -o -t d -e -f
+	    ff . -t f -not -mode u+w -f -o -t d -e -f
 	                                        read-only files and empty directories
 	NOTES
 	  -u and -g resolve names on Linux by running getent from /usr/bin or
@@ -440,8 +516,18 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	  HFS+ a precomposed pattern does not match a decomposed name.
 
 	HISTORY
+	  rev 6adcb748 20261024 064856 PDT Sat 06:48 AM 24 Oct 2026
+	      -mode is the permission query, was -k; -k[r][N] sorts output by
+	      cksh field N (1 inode 2 links 4 size 5 mdate 6 name, default 6),
+	      keyed by node stat, no -v needed; -k3 passes walk order through.
+	  rev 6abc5da8 20260929 175400 PDT Tue 05:54 PM 29 Sep 2026
+	      -0 true and -1 false replace -true and -false; -Z is NUL output
+	      (was -0); -y replaces -same; -w [+-][ ]: the sign may stand
+	      apart; -delete is a long switch to confirm. ff.fn.bash gives -x
+	      ./name where BSD find -execdir passes a bare name. -delete
+	      refuses an operand ending in .., or the root directory, whole.
 	  rev 6abb42b9 20260928 214649 PDT Mon 09:46 PM 28 Sep 2026
-	      -w is when: [+-]([.]/file|HEX), before, after or at a file's
+	      -w is when: [+-]([.][.]/file|HEX), before, after or at a file's
 	      mtime or a hex epoch second; a file takes ./ ../ or /; bare
 	      -w file was newer, now -w +./file. -same, -true, -false; -i
 	      reads hex; -V shows the native find command (ff.fn.bash), which
@@ -461,18 +547,24 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
 	  Unlimited use with attribution.
 	eof
     } # _ff_manual
-  local a= b= c= i= n= v= u= s= k= dia= gs=e gd=0 prev= endopt= inexpr= act= ls= xd= rc=0
-  local E= I= H= L= D= S= X= Z= V= lo=0 hi= re= reader= f= t= wd= rf= nref=0
-  local -a paths=() opt=() pre=() ex=()
+  local a= b= c= i= n= v= v2= u= s= k= dia= gs=e gd=0 prev= endopt= inexpr= act= ls= xd= rc=0 sk= sr=
+  local E= I= H= L= D= S= X= Z= V= lo=0 hi= re= ro= reader= f= t= wd= rf= nref=0 xb= xm=
+  local -a paths=() opt=() pre=() ex=() xw=() kp=() kr=()
+  # -x where -execdir passes a bare name (BSD): words stay arguments, never
+  # evaluated; names ($1 marks {} words with 1, and every + name) gain ./
+  local dotsh='m=$1; shift; n=$#; for a in "$@"; do case $m in 0*) ;; *) case $a in ./*) ;; *) a=./$a ;; esac ;; esac; m=${m#?}; set -- "$@" "$a"; done; shift $n; exec "$@"'
   # BSD find takes -E before paths (NetBSD, Darwin, FreeBSD); GNU takes -regextype
   command find -E /dev/null -maxdepth 0 >/dev/null 2>&1 && dia=bsd || dia=gnu
-  # pre-pass and translation in one: options anywhere, paths before the expression
+  # options first, since a primary before them (-n x -I) must still see them;
+  # then translation: paths before the expression, option words skipped
+  _ff_opts "$@"
   while (($#)); do
     a="$1" ; shift
-    [ -z "$endopt" ] && [[ "$a" =~ ^-[EIHLDSX0V]+$ ]] && {
-      for ((i=1; i<${#a}; i++)); do case "${a:i:1}" in
-        E) E=1 ;; I) I=1 ;; H) H=1 L= ;; L) L=1 H= ;; D) D=1 ;; S) S=1 ;; X) X=1 ;; 0) Z=1 ;; V) V=1 ;;
-      esac ; done ; continue ;} || :
+    [ -z "$endopt" ] && [[ "$a" =~ ^-[EIHLDSXZV]+$ ]] && continue || :
+    # -k[r][N], global and last wins; the hash (3) is always ., so -k3 holds nothing
+    [ -z "$endopt" ] && [[ "$a" == -k* ]] && {
+      [[ "$a" =~ ^-k(r?)([1-6]?)$ ]] || { _ffbad "-k: sort key is [r][1-6], not" 6ab7ff4c "$a" ; return 1 ;}
+      sr="${BASH_REMATCH[1]}" ; sk="${BASH_REMATCH[2]:-6}" ; [ "$sk" = 3 ] && sk= || : ; continue ;} || :
     [ -z "$endopt$inexpr" ] && [ "$a" = "--" ] && { endopt=1 ; continue ;} || :
     [ -z "$endopt$inexpr" ] && [ "$a" = "-h" ] && { _ff_usage ; return 0 ;} || :
     [ -z "$endopt$inexpr" ] && [ "$a" = "--help" ] && { _ff_manual ; return 0 ;} || :
@@ -481,9 +573,13 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
       paths+=("$a") ; continue ;} || :
     inexpr=1
     # primaries taking one argument
-    [[ "$a" =~ ^(-[nprtdsmacbwkugli]|-same)$ ]] && {
+    [[ "$a" =~ ^-[nprtdsmacbwugliy]$|^-mode$ ]] && {
       (($#)) || { _ffbad "missing argument for" 6ab7ff02 "$a" ; return 1 ;}
-      v="$1" ; shift ;} || :
+      v="$1" ; shift ; v2=
+      # -w + file: a lone sign keeps the next word as well
+      [ "$a" = -w ] && [[ "$v" == [+-] ]] && {
+        (($#)) || { _ffbad "missing argument for" 6ab7ff02 "$a" ; return 1 ;}
+        v2="$1" ; shift ;} || : ;} || :
     # grammar state: e expects a term, t follows one; mirrors ff.c parse_or/and/not
     case "$a" in
       '!'|-not) gs=e ; ex+=('!') ;;
@@ -494,13 +590,21 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
       -o) [ "$gs" = t ] || { _ffbad "unexpected" 6ab7ff05 "-o" ; return 1 ;} ; gs=e ; ex+=(-o) ;;
       -n) gs=t ; [ -n "$I" ] && ex+=(-iname "$v") || ex+=(-name "$v") ;;
       -p) gs=t ; [ -n "$I" ] && ex+=(-ipath "$v") || ex+=(-path "$v") ;;
-      -r) gs=t ; re=1
+      -r) gs=t ; re=1 ; ro="$v"
           # ff -r is unanchored; native -regex matches the whole path
           [ -n "$E" ] && {
             [[ "$v" =~ \\[1-9] ]] && { chkerr "ff : -r backreference under -E needs ff.c (6ab7ff40)" ; return 2 ;}
             v=".*($v).*" ;} || {
             [[ "$v" =~ ^\^ ]] && v="${v#^}" || v=".*$v"
             [[ "$v" =~ [^\\]\$$|^\$$ ]] && v="${v%\$}" || v="$v.*" ;}
+          # a bad expression is a usage error before any walk, as ff.c regcomp;
+          # the native find compiles it, and only the binary adds the reason
+          { case "$dia$E" in
+              bsd1) command find -E /dev/null -maxdepth 0 -regex "$v" ;;
+              bsd) command find /dev/null -maxdepth 0 -regex "$v" ;;
+              gnu1) command find /dev/null -maxdepth 0 -regextype posix-extended -regex "$v" ;;
+              *) command find /dev/null -maxdepth 0 -regextype posix-basic -regex "$v" ;;
+            esac ;} >/dev/null 2>&1 || { _ffbad "-r: bad regular expression" 6ab7ff09 "$ro" ; return 1 ;}
           [ -n "$I" ] && ex+=(-iregex "$v") || ex+=(-regex "$v") ;;
       -t) gs=t ; [[ "$v" =~ ^[fdlpsbc]+$ ]] || { _ffbad "-t: types are f d l p s b c, not" 6ab7ff0a "$v" ; return 1 ;}
           ((${#v}>1)) && ex+=('(') || :
@@ -529,18 +633,19 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
           # minutes: +N over N units, -N under N units, N within [N, N+1) units
           case "$s" in +) ex+=(-${k}min "+$((n*u/60))") ;; -) ex+=(-${k}min "-$((n*u/60))") ;;
             *) ex+=('(' -${k}min "-$(((n+1)*u/60))") ; ((n)) && ex+=(! -${k}min "-$((n*u/60))") || : ; ex+=(')') ;; esac ;;
-      -w) gs=t ; _ff_when "$v" || return $? ;;
-      -same) gs=t ; { [ -n "$H$L" ] && [ -e "$v" ] ;} || { [ -z "$H$L" ] && { [ -e "$v" ] || [ -L "$v" ] ;} ;} \
-            || { _ffbad "-same: cannot stat" 6ab7ff48 "$v" ; return 1 ;}
+      -w) gs=t ; _ff_when "$v" "$v2" || return $? ;;
+      -y) gs=t ; { [ -n "$H$L" ] && [ -e "$v" ] ;} || { [ -z "$H$L" ] && { [ -e "$v" ] || [ -L "$v" ] ;} ;} \
+            || { _ffbad "-y: cannot stat" 6ab7ff48 "$v" ; return 1 ;}
           # -samefile where the native find has it; else the inode (exact within one filesystem)
           [ -z "$FF_NO_SAMEFILE" ] && command find /dev/null -maxdepth 0 -samefile /dev/null >/dev/null 2>&1 \
             && ex+=(-samefile "$v") || {
             read -r k < <(stat ${H:+-L} ${L:+-L} -c %i -- "$v" 2>/dev/null || stat ${H:+-L} ${L:+-L} -f %i -- "$v" 2>/dev/null) || :
-            [[ "$k" =~ ^[0-9]+$ ]] || { _ffbad "-same: cannot stat" 6ab7ff48 "$v" ; return 1 ;}
+            [[ "$k" =~ ^[0-9]+$ ]] || { _ffbad "-y: cannot stat" 6ab7ff48 "$v" ; return 1 ;}
             ex+=(-inum "$k") ;} ;;
-      -true) gs=t ; ex+=('(' -type d -o ! -type d ')') ;;
-      -false) gs=t ; ex+=(! '(' -type d -o ! -type d ')') ;;
-      -k) gs=t ; _ff_perm "$v" || return 1 ;;
+      # true and false; not every find has -true -false
+      -0) gs=t ; ex+=('(' -type d -o ! -type d ')') ;;
+      -1) gs=t ; ex+=(! '(' -type d -o ! -type d ')') ;;
+      -mode) gs=t ; _ff_perm "$v" || return 1 ;;
       -u|-g) gs=t ; [ "$a" = -u ] && k=-user || k=-group
           command find /dev/null -maxdepth 0 "$k" "$v" >/dev/null 2>&1 \
             || { _ffbad "${a}: no such ${k#-}" "$([ "$a" = -u ] && echo 6ab7ff12 || echo 6ab7ff13)" "$v" ; return 1 ;} ; ex+=("$k" "$v") ;;
@@ -556,16 +661,16 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
       -q) gs=t ; act+=q
           command find /dev/null -maxdepth 0 -quit >/dev/null 2>&1 && ex+=(-quit) || ex+=(-exit) ;;
       -delete) gs=t ; act+=r ; D=1 ; ex+=(-delete) ;;
-      -x|-j) gs=t ; act+=x ; [ "$a" = -x ] && ex+=(-execdir) || ex+=(-exec)
-          n=0 ; b= ; c= ; prev="$a"
+      -x|-j) gs=t ; act+=x
+          n=0 ; b= ; c= ; xm= ; xw=() ; prev="$a"
           while (($#)); do
             [ "$1" = ";" ] && break || :
             [ "$1" = "+" ] && [ "$prev" = "{}" ] && break || :
             [[ "$1" == *"{}"* ]] && [ "$1" != "{}" ] && { _ffbad "{} must be a whole argument, not" 6ab7ff19 "$1" ; return 1 ;} || :
             ((n==0)) && [ "$1" = "{}" ] && { _ffbad "{} cannot be the command of" 6ab7ff1b "$a" ; return 1 ;} || :
-            [ "$1" = "{}" ] && c=$((c+1)) || :
+            [ "$1" = "{}" ] && { c=$((c+1)) ; xm+=1 ;} || xm+=0
             ((n==0)) && b="$1" || :
-            ex+=("$1") ; prev="$1" ; n=$((n+1)) ; shift
+            xw+=("$1") ; prev="$1" ; n=$((n+1)) ; shift
           done
           (($#)) || { _ffbad "missing ; or {} + after" 6ab7ff1d "$a" ; return 1 ;}
           ((n)) || { _ffbad "missing command after" 6ab7ff18 "$a" ; return 1 ;}
@@ -573,7 +678,15 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
           [ "$a" = -x ] && [[ "$b" == */* ]] && [[ "$b" != /* ]] \
             && { _ffbad "-x: command must be absolute or found in PATH, not" 6ab7ff1c "$b" ; return 1 ;} || :
           [ "$a" = -x ] && [[ "$b" != */* ]] && xd=1 || :
-          ex+=("$1") ; shift ;;
+          # -execdir names: GNU ./name as ff.c, BSD a bare name; probe once per call
+          [ "$a" = -x ] && [ -z "$xb" ] && {
+            read -r k < <(command find /dev/null -maxdepth 0 -execdir echo {} \; 2>/dev/null) || :
+            [[ "$k" == ./* ]] && [ -z "$FF_BARE_EXECDIR" ] && xb=n || xb=y ;} || :
+          # a bare name gains ./ through dotsh; with + every name past the words does
+          [ "$a" = -x ] && [ "$xb" = y ] && { [ "$1" = + ] && xm="${xm%?}" || :
+            ex+=(-execdir /bin/sh -c "$dotsh" ff "$xm" "${xw[@]}" "$1") ;} \
+            || { [ "$a" = -x ] && ex+=(-execdir "${xw[@]}" "$1") || ex+=(-exec "${xw[@]}" "$1") ;}
+          shift ;;
       *) [[ "$a" =~ ^- ]] && _ffbad "unknown primary" 6ab7ff03 "$a" || _ffbad "unexpected word" 6ab7ff04 "$a" ; return 1 ;;
     esac
     prev="$a"
@@ -586,11 +699,23 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
   [ -n "$t" ] && return 2 || :
   # capability limits of the translator: exit 2, the binary has no such limit
   [ -n "$ls" ] && [[ "$act" =~ [fxr] ]] && { chkerr "ff : -v with other actions needs ff.c (6ab7ff43)" ; return 2 ;} || :
+  [ -n "$sk" ] && ! printf 'a\0' | sort -z -s -t $'\t' -k1,1n >/dev/null 2>&1 && { chkerr "ff : -k needs sort -z -s, use ff.c (6ab7ff4d)" ; return 2 ;} || :
   [ -n "$S" ] && [ "$dia" = gnu ] && [[ "$act" =~ [xrq] ]] && { chkerr "ff : -S with -x -j -delete -q needs ff.c on GNU find (6ab7ff44)" ; return 2 ;} || :
   for a in "${paths[@]}"; do
     [[ "$a" =~ ^- ]] && { chkerr "ff : path begins with -, use ./ or ff.c '$a' (6ab7ff45)" ; return 2 ;} || :
   done
   ((${#paths[@]})) || paths=(.)
+  # -delete refuses an operand whole, as ff.c refuse_operand: last component
+  # .., or the root directory by identity (-ef; with -H a symlink to it), not
+  # walked, status 4; the native find would refuse only the node, or not at all
+  [[ "$act" == *r* ]] && {
+    kp=() ; for a in "${paths[@]}"; do
+      b="$a" ; while [[ "$b" == */ && "$b" != / ]]; do b="${b%/}" ; done
+      { [ "${b##*/}" = .. ] || { { [ -n "$H" ] || [ ! -L "$a" ] ;} && [ "$a" -ef / ] ;} ;} \
+        && { _ffbad "refusing to delete" 6ab7ff37 "$a" ; rc=$((rc|4)) ;} || kp+=("$a")
+    done
+    ((${#kp[@]})) || return $rc
+    paths=("${kp[@]}") ;} || :
   [ -n "$hi" ] && ((hi<lo)) && return 0 || :   # no depth satisfies -d
   # options before paths, global primaries first in the expression
   [ -n "$H" ] && opt+=(-H) || : ; [ -n "$L" ] && opt+=(-L) || :
@@ -602,7 +727,7 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
   ((${#ex[@]})) || [ -n "$act" ] || ex=(-print)
   [ -z "$act" ] && [ "${ex[*]}" != "-print" ] && ex=('(' "${ex[@]}" ')' -print) || :
   # printing: native -print/-print0 to a pipe; tty escaping, -v and emulated -S read NUL records
-  { [ -n "$ls" ] || { [ -t 1 ] && [ -z "$Z" ] ;} || { [ -n "$S" ] && [ "$dia" = gnu ] ;} ;} && reader=1 || :
+  { [ -n "$ls$sk" ] || { [ -t 1 ] && [ -z "$Z" ] ;} || { [ -n "$S" ] && [ "$dia" = gnu ] ;} ;} && reader=1 || :
   [ -n "$reader$Z" ] && for ((i=0; i<${#ex[@]}; i++)); do
     [ "${ex[i]}" = -print ] && ex[i]=-print0 || :
     # skip command words through the ; or {} + terminator
@@ -621,5 +746,6 @@ ff () ( # functional find: ff grammar run by the host's native find; companion f
     _ff_show find "${opt[@]}" "${paths[@]}" "${pre[@]}" "${ex[@]}"
     while IFS= read -r -d '' f; do _ff_rec "$f" ; done < <(command find "${opt[@]}" "${paths[@]}" "${pre[@]}" "${ex[@]}")
     wait $! || rc=$((rc|4)) ;}
+  [ -n "$sk" ] && { [ -n "$V" ] && stderr "# sorted by ff.fn.bash: -k$sr$sk" || : ; _ff_ksort ;} || :
   return $rc
   ) # ff
